@@ -16,6 +16,7 @@ def render_dashboard(root: str) -> str:
         "<tr>"
         f"<td>{html.escape(item['path'])}</td>"
         f"<td>{html.escape(item['language'])}</td>"
+        f"<td>{html.escape(', '.join(item.get('owners', [])) or 'unowned')}</td>"
         f"<td>{item['lines']}</td>"
         f"<td>{len(item['outgoing_dependencies'])}</td>"
         f"<td>{len(item['todos'])}</td>"
@@ -32,6 +33,13 @@ def render_dashboard(root: str) -> str:
         for item in report["todos"][:12]
     )
     insight_cards = "".join(f"<li>{html.escape(item)}</li>" for item in report["insights"])
+    owner_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(item['owner'])}</td>"
+        f"<td>{item['files']}</td>"
+        "</tr>"
+        for item in report.get("owners", [])[:10]
+    )
     file_options = "".join(
         f'<option value="{html.escape(item["path"])}">{html.escape(item["path"])}</option>'
         for item in report["files"][:80]
@@ -121,6 +129,12 @@ def render_dashboard(root: str) -> str:
       grid-template-columns: 1.2fr 0.8fr;
       gap: 16px;
     }}
+    .owners-grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 16px;
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -189,7 +203,7 @@ def render_dashboard(root: str) -> str:
       margin-top: 10px;
     }}
     @media (max-width: 960px) {{
-      .hero, .content {{ grid-template-columns: 1fr; }}
+      .hero, .content, .owners-grid {{ grid-template-columns: 1fr; }}
       .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .viewer {{ grid-template-columns: 1fr; }}
     }}
@@ -220,7 +234,7 @@ def render_dashboard(root: str) -> str:
         <h2>Hotspots</h2>
         <table>
           <thead>
-            <tr><th>Path</th><th>Lang</th><th>Lines</th><th>Deps</th><th>TODOs</th><th>Score</th></tr>
+            <tr><th>Path</th><th>Lang</th><th>Owners</th><th>Lines</th><th>Deps</th><th>TODOs</th><th>Score</th></tr>
           </thead>
           <tbody>{hottest_rows}</tbody>
         </table>
@@ -233,6 +247,22 @@ def render_dashboard(root: str) -> str:
           </thead>
           <tbody>{todo_rows or '<tr><td colspan="3">No TODO markers found.</td></tr>'}</tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="owners-grid">
+      <div class="panel table-wrap">
+        <h2>Ownership Load</h2>
+        <table>
+          <thead>
+            <tr><th>Owner</th><th>Files</th></tr>
+          </thead>
+          <tbody>{owner_rows or '<tr><td colspan="2">No CODEOWNERS file detected.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="panel table-wrap">
+        <h2>Review Angle</h2>
+        <div class="meta">Pair hotspot rank with ownership to see who is likely to review or absorb risk.</div>
       </div>
     </section>
 

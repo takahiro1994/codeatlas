@@ -24,6 +24,7 @@ class FileReport:
     language: str
     lines: int
     size_bytes: int
+    owners: list[str] = field(default_factory=list)
     outgoing_dependencies: list[str] = field(default_factory=list)
     incoming_dependencies: list[str] = field(default_factory=list)
     todos: list[TodoItem] = field(default_factory=list)
@@ -56,6 +57,7 @@ class ProjectReport:
     doc_issues: list[DocIssue]
     graph: dict[str, list[dict[str, str]]]
     insights: list[str]
+    owners: list[dict[str, int]]
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +67,7 @@ class ProjectReport:
             "doc_issues": [asdict(item) for item in self.doc_issues],
             "graph": self.graph,
             "insights": self.insights,
+            "owners": self.owners,
         }
 
 

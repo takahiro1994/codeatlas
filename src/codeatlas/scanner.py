@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from collections import Counter, defaultdict
+from fnmatch import fnmatch
 from pathlib import Path
 
 from .models import DocIssue, FileReport, ProjectReport, ReportDelta, Summary, TodoItem
@@ -191,6 +192,40 @@ def normalize_doc_reference(doc_path: Path, root: Path, reference: str) -> str |
         return None
 
 
+def load_codeowners(root: Path) -> list[tuple[str, list[str]]]:
+    candidates = [root / "CODEOWNERS", root / ".github" / "CODEOWNERS", root / "docs" / "CODEOWNERS"]
+    for path in candidates:
+        if not path.exists():
+            continue
+        rules: list[tuple[str, list[str]]] = []
+        for raw_line in read_text(path).splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            pattern, owners = parts[0], parts[1:]
+            rules.append((pattern, owners))
+        return rules
+    return []
+
+
+def match_codeowners(rel_path: str, rules: list[tuple[str, list[str]]]) -> list[str]:
+    normalized = rel_path.replace("\\", "/")
+    matched: list[str] = []
+    for pattern, owners in rules:
+        normalized_pattern = pattern.lstrip("/")
+        if pattern.endswith("/"):
+            normalized_pattern = normalized_pattern.rstrip("/") + "/**"
+        if fnmatch(normalized, normalized_pattern) or fnmatch("/" + normalized, pattern):
+            matched = owners
+            continue
+        if "/" not in normalized_pattern and fnmatch(Path(normalized).name, normalized_pattern):
+            matched = owners
+    return matched
+
+
 def analyze_docs(root: Path, file_set: set[str]) -> list[DocIssue]:
     issues: list[DocIssue] = []
     for doc_path in iter_files(root):
@@ -305,6 +340,10 @@ def generate_insights(summary: Summary, files: list[FileReport], doc_issues: lis
     code = summary.total_files - docs
     if code and docs and docs / max(code, 1) < 0.15:
         insights.append("Documentation coverage looks thin relative to the amount of source code.")
+    owner_counter = Counter(owner for item in files for owner in item.owners)
+    if owner_counter:
+        owner, count = owner_counter.most_common(1)[0]
+        insights.append(f"Most loaded owner: {owner} across {count} tracked files.")
     return insights
 
 
@@ -315,6 +354,7 @@ def scan_project(root: str | Path) -> ProjectReport:
     all_todos: list[TodoItem] = []
     file_set: set[str] = set()
     git_churn = load_git_churn(root_path)
+    codeowners = load_codeowners(root_path)
 
     for path in iter_files(root_path):
         rel_path = str(path.relative_to(root_path))
@@ -328,6 +368,7 @@ def scan_project(root: str | Path) -> ProjectReport:
             language=language,
             lines=lines,
             size_bytes=path.stat().st_size,
+            owners=match_codeowners(rel_path, codeowners),
             outgoing_dependencies=extract_dependencies(path, text),
             todos=todos,
         )
@@ -369,6 +410,7 @@ def scan_project(root: str | Path) -> ProjectReport:
         hottest_files=[item.path for item in ranked[:5]],
     )
     insights = generate_insights(summary, file_reports, doc_issues)
+    owner_counter = Counter(owner for item in file_reports for owner in item.owners)
     return ProjectReport(
         summary=summary,
         files=ranked,
@@ -376,6 +418,7 @@ def scan_project(root: str | Path) -> ProjectReport:
         doc_issues=doc_issues,
         graph={"nodes": [{"id": item.path, "language": item.language} for item in file_reports], "edges": edges},
         insights=insights,
+        owners=[{"owner": owner, "files": count} for owner, count in owner_counter.most_common()],
     )
 
 
@@ -429,13 +472,22 @@ def report_to_markdown(report: ProjectReport) -> str:
     for item in report.files[:15]:
         lines.append(
             f"| `{item.path}` | {item.language} | {item.lines} | {len(item.outgoing_dependencies)} | "
-            f"{len(item.todos)} | {item.hotspot_score} |"
+            f"{len(item.todos)} | {item.hotspot_score} | {', '.join(item.owners) or '-'} |"
         )
+    lines[lines.index("| Path | Language | Lines | Deps | TODOs | Score |")] = (
+        "| Path | Language | Lines | Deps | TODOs | Score | Owners |"
+    )
+    lines[lines.index("| --- | --- | ---: | ---: | ---: | ---: |")] = (
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |"
+    )
     if report.doc_issues:
         lines.extend(["", "## Documentation Drift", ""])
         lines.extend(
             f"- `{item.doc_path}` references missing `{item.referenced_path}`" for item in report.doc_issues[:20]
         )
+    if report.owners:
+        lines.extend(["", "## Ownership", ""])
+        lines.extend(f"- `{item['owner']}` owns {item['files']} tracked files" for item in report.owners[:12])
     if report.todos:
         lines.extend(["", "## TODO Feed", ""])
         lines.extend(
@@ -589,6 +641,21 @@ def format_delta(delta: ReportDelta) -> str:
     return "\n".join(lines)
 
 
+def format_owner_summary(report: ProjectReport) -> str:
+    lines = [f"Root: {report.summary.root}", "Owners:"]
+    if not report.owners:
+        lines.append("- No CODEOWNERS file detected.")
+        return "\n".join(lines)
+    files_by_path = {item.path: item for item in report.files}
+    for owner_info in report.owners[:20]:
+        owner = owner_info["owner"]
+        owned_files = [item for item in report.files if owner in item.owners]
+        hottest = sorted(owned_files, key=lambda item: (-item.hotspot_score, item.path))[:3]
+        hottest_text = ", ".join(f"{item.path}({item.hotspot_score})" for item in hottest) or "none"
+        lines.append(f"- {owner}: {owner_info['files']} files; hotspots: {hottest_text}")
+    return "\n".join(lines)
+
+
 def load_report(path: str | Path) -> ProjectReport:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     summary = Summary(**payload["summary"])
@@ -601,6 +668,7 @@ def load_report(path: str | Path) -> ProjectReport:
                 language=item["language"],
                 lines=item["lines"],
                 size_bytes=item["size_bytes"],
+                owners=item.get("owners", []),
                 outgoing_dependencies=item.get("outgoing_dependencies", []),
                 incoming_dependencies=item.get("incoming_dependencies", []),
                 todos=todos,
@@ -615,6 +683,7 @@ def load_report(path: str | Path) -> ProjectReport:
         doc_issues=[DocIssue(**item) for item in payload.get("doc_issues", [])],
         graph=payload.get("graph", {"nodes": [], "edges": []}),
         insights=payload.get("insights", []),
+        owners=payload.get("owners", []),
     )
 
 
@@ -645,6 +714,7 @@ def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectRep
         f"{len(todos)} TODO-style markers are present in changed files.",
         f"{len(doc_issues)} documentation issues touch the changed surface.",
     ]
+    owner_counter = Counter(owner for item in files for owner in item.owners)
     return ProjectReport(
         summary=summary,
         files=files,
@@ -652,4 +722,5 @@ def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectRep
         doc_issues=doc_issues,
         graph={"nodes": nodes, "edges": edges},
         insights=insights,
+        owners=[{"owner": owner, "files": count} for owner, count in owner_counter.most_common()],
     )

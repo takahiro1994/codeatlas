@@ -8,6 +8,7 @@ from codeatlas.scanner import (
     extract_todos,
     focus_report_on_paths,
     format_summary,
+    format_owner_summary,
     load_report,
     report_to_markdown,
     report_to_sarif,
@@ -70,6 +71,20 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(focused.summary.total_files, 1)
         self.assertEqual(focused.files[0].path, "src/app.py")
         self.assertTrue(all(item.path == "src/app.py" for item in focused.todos))
+
+    def test_codeowners_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("# TODO: keep owner mapping\n", encoding="utf-8")
+            (root / ".github").mkdir()
+            (root / ".github" / "CODEOWNERS").write_text("src/* @team-core @alice\n", encoding="utf-8")
+            report = scan_project(root)
+            app_file = next(item for item in report.files if item.path == "src/app.py")
+            self.assertEqual(app_file.owners, ["@team-core", "@alice"])
+            self.assertTrue(any(item["owner"] == "@team-core" for item in report.owners))
+            owner_summary = format_owner_summary(report)
+            self.assertIn("@team-core", owner_summary)
 
     def test_todo_extraction_prefers_comment_context(self) -> None:
         py_items = extract_todos(

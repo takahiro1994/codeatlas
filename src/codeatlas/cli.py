@@ -7,6 +7,7 @@ from pathlib import Path
 from .scanner import (
     compare_reports,
     format_delta,
+    format_owner_summary,
     format_summary,
     focus_report_on_paths,
     list_changed_files,
@@ -38,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
     compare_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     compare_parser.add_argument("--output", help="Write the diff report to a file.")
+
+    owners_parser = subparsers.add_parser("owners", help="Summarize CODEOWNERS coverage and hotspots.")
+    owners_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
+    owners_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    owners_parser.add_argument("--output", help="Write the owner report to a file.")
 
     changes_parser = subparsers.add_parser("changes", help="Analyze only files changed between two git refs.")
     changes_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
@@ -81,6 +87,13 @@ def main() -> None:
         current = scan_project(args.path)
         delta = compare_reports(baseline, current)
         output = json.dumps(delta.to_dict(), indent=2) if args.json else format_delta(delta)
+        if args.output:
+            Path(args.output).write_text(output, encoding="utf-8")
+        print(output)
+        return
+    if args.command == "owners":
+        report = scan_project(args.path)
+        output = json.dumps({"root": report.summary.root, "owners": report.owners}, indent=2) if args.json else format_owner_summary(report)
         if args.output:
             Path(args.output).write_text(output, encoding="utf-8")
         print(output)

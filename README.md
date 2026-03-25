@@ -38,6 +38,7 @@ codeatlas scan /path/to/repo --markdown --output report.md
 codeatlas scan /path/to/repo --sarif --output report.sarif
 codeatlas compare baseline.json /path/to/repo
 codeatlas changes /path/to/repo --base main --head HEAD --markdown
+codeatlas owners /path/to/repo
 codeatlas serve /path/to/repo --port 9000
 codeatlas demo
 ```
@@ -53,6 +54,7 @@ codeatlas demo
 - overly large files and dense dependency hubs
 - git churn hotspots using local commit history
 - broken local references inside docs
+- CODEOWNERS-based ownership overlays when a repository defines them
 
 ### Output
 
@@ -63,12 +65,15 @@ codeatlas demo
 - TODO feed
 - lightweight dependency visualization
 - interactive file drilldown with inline source preview
+- ownership load table driven by `CODEOWNERS`
 
 ### CI And Review Workflows
 
 - `--sarif` exports findings into a format that GitHub code scanning and other CI systems can ingest.
 - `compare` lets you diff a stored baseline report against the current working tree to spot new TODOs, new documentation drift, and worsening hotspots.
 - `changes` narrows the report to files touched between two git refs, which is useful for pull request review.
+- hotspot and changed-file views inherit `CODEOWNERS` assignments so review surfaces show likely owners.
+- `owners` prints owner-by-owner load and their hottest files.
 
 ### GitHub Actions
 

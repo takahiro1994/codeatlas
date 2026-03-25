@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .models import DocIssue, FileReport, ProjectReport, ReportDelta, RuleViolation, Summary, TodoItem
+from .models import DocIssue, FileReport, ProjectReport, ReportDelta, RuleViolation, SecurityFinding, Summary, TodoItem
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "Python",
@@ -52,6 +52,13 @@ JS_IMPORT_RE = re.compile(
     re.MULTILINE,
 )
 DOC_PATH_RE = re.compile(r"(?:\[[^\]]+\]\(([^)]+)\)|`([^`]+\.[A-Za-z0-9]+)`)")
+SECRET_RE = re.compile(r"""(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*["']([A-Za-z0-9_\-\/+=]{8,})["']""")
+RISKY_PATTERN_RULES = [
+    (re.compile(r"\beval\s*\("), "risky-eval", "warning", "Use of eval detected"),
+    (re.compile(r"\bexec\s*\("), "risky-exec", "warning", "Use of exec detected"),
+    (re.compile(r"subprocess\.(?:run|Popen)\(.*shell\s*=\s*True"), "shell-true", "warning", "subprocess shell=True detected"),
+    (re.compile(r"child_process\.(?:exec|execSync)\s*\("), "child-process-exec", "warning", "child_process exec detected"),
+]
 
 
 def normalize_prefix(pattern: str) -> str:
@@ -170,6 +177,163 @@ def extract_python_dependencies(path: Path, text: str) -> list[str]:
             elif package_parts:
                 deps.append(".".join(package_parts[:-1]))
     return sorted(set(dep for dep in deps if dep))
+
+
+def analyze_python_health(text: str) -> dict[str, int]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return {"functions": 0, "branches": 0, "max_nesting": 0, "long_functions": 0}
+
+    functions = 0
+    branches = 0
+    max_nesting = 0
+    long_functions = 0
+
+    def visit(node: ast.AST, depth: int = 0) -> None:
+        nonlocal functions, branches, max_nesting, long_functions
+        branch_nodes = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith, ast.Match)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions += 1
+            body_lines = [child.lineno for child in ast.walk(node) if hasattr(child, "lineno")]
+            if body_lines and max(body_lines) - min(body_lines) + 1 > 40:
+                long_functions += 1
+        if isinstance(node, branch_nodes):
+            branches += 1
+            depth += 1
+            max_nesting = max(max_nesting, depth)
+        for child in ast.iter_child_nodes(node):
+            visit(child, depth)
+
+    visit(tree)
+    return {
+        "functions": functions,
+        "branches": branches,
+        "max_nesting": max_nesting,
+        "long_functions": long_functions,
+    }
+
+
+def analyze_generic_health(text: str) -> dict[str, int]:
+    lines = text.splitlines()
+    indent_levels = [len(line) - len(line.lstrip()) for line in lines if line.strip()]
+    return {
+        "functions": sum(1 for line in lines if re.search(r"\b(function|def|class)\b", line)),
+        "branches": sum(1 for line in lines if re.search(r"\b(if|for|while|case|switch|try)\b", line)),
+        "max_nesting": (max(indent_levels) // 4) if indent_levels else 0,
+        "long_functions": 0,
+    }
+
+
+def code_health_score_for(path: Path, text: str) -> tuple[dict[str, int], int]:
+    if path.suffix.lower() == ".py":
+        metrics = analyze_python_health(text)
+    else:
+        metrics = analyze_generic_health(text)
+    score = 100
+    score -= min(metrics["branches"] * 2, 30)
+    score -= min(metrics["max_nesting"] * 6, 24)
+    score -= min(metrics["long_functions"] * 8, 24)
+    return metrics, max(score, 0)
+
+
+def detect_security_findings(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    suffix = Path(rel_path).suffix.lower()
+    if suffix == ".py":
+        return detect_python_security_findings(rel_path, text)
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        secret = SECRET_RE.search(line)
+        if secret and not line.strip().startswith("#"):
+            findings.append(
+                SecurityFinding(
+                    kind="possible-secret",
+                    severity="warning",
+                    path=rel_path,
+                    line=line_no,
+                    message=f"Possible hardcoded secret for {secret.group(1)}",
+                )
+            )
+        for pattern, kind, severity, message in RISKY_PATTERN_RULES:
+            if pattern.search(line):
+                findings.append(
+                    SecurityFinding(kind=kind, severity=severity, path=rel_path, line=line_no, message=message)
+                )
+        if suffix == ".json" and Path(rel_path).name == "package.json":
+            broad = re.search(r'"[^"]+"\s*:\s*"\^|~|\*|latest', line)
+            if broad:
+                findings.append(
+                    SecurityFinding(
+                        kind="broad-dependency-range",
+                        severity="note",
+                        path=rel_path,
+                        line=line_no,
+                        message="Broad dependency range detected in package.json",
+                    )
+                )
+        if Path(rel_path).name in {"requirements.txt", "requirements-dev.txt"}:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "==" not in stripped:
+                findings.append(
+                    SecurityFinding(
+                        kind="unpinned-python-dependency",
+                        severity="note",
+                        path=rel_path,
+                        line=line_no,
+                        message="Dependency is not pinned exactly",
+                    )
+                )
+    return findings
+
+
+def detect_python_security_findings(rel_path: str, text: str) -> list[SecurityFinding]:
+    findings: list[SecurityFinding] = []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return findings
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    lower_name = target.id.lower()
+                    if any(token in lower_name for token in ("key", "secret", "token", "password")) and len(node.value.value) >= 8:
+                        findings.append(
+                            SecurityFinding(
+                                kind="possible-secret",
+                                severity="warning",
+                                path=rel_path,
+                                line=getattr(node, "lineno", 1),
+                                message=f"Possible hardcoded secret for {target.id}",
+                            )
+                        )
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in {"eval", "exec"}:
+                findings.append(
+                    SecurityFinding(
+                        kind=f"risky-{func.id}",
+                        severity="warning",
+                        path=rel_path,
+                        line=getattr(node, "lineno", 1),
+                        message=f"Use of {func.id} detected",
+                    )
+                )
+            if isinstance(func, ast.Attribute) and func.attr in {"run", "Popen"}:
+                if isinstance(func.value, ast.Name) and func.value.id == "subprocess":
+                    for keyword in node.keywords:
+                        if keyword.arg == "shell" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                            findings.append(
+                                SecurityFinding(
+                                    kind="shell-true",
+                                    severity="warning",
+                                    path=rel_path,
+                                    line=getattr(node, "lineno", 1),
+                                    message="subprocess shell=True detected",
+                                )
+                            )
+    return findings
 
 
 def extract_dependencies(path: Path, text: str) -> list[str]:
@@ -592,6 +756,7 @@ def generate_insights(
     files: list[FileReport],
     doc_issues: list[DocIssue],
     rule_violations: list[RuleViolation],
+    security_findings: list[SecurityFinding],
     cycles: list[list[str]],
 ) -> list[str]:
     insights: list[str] = []
@@ -603,6 +768,8 @@ def generate_insights(
         insights.append(f"{len(doc_issues)} documentation references point to missing files.")
     if rule_violations:
         insights.append(f"{len(rule_violations)} structural rule violations were detected.")
+    if security_findings:
+        insights.append(f"{len(security_findings)} security or manifest risk findings were detected.")
     if cycles:
         insights.append(f"{len(cycles)} dependency cycles were detected.")
     if summary.hottest_files:
@@ -637,6 +804,7 @@ def scan_project(root: str | Path) -> ProjectReport:
     codeowners = load_codeowners(root_path)
     git_authors = load_git_authors(root_path)
     config = load_config(root_path)
+    security_findings: list[SecurityFinding] = []
 
     for path in iter_files(root_path):
         rel_path = str(path.relative_to(root_path))
@@ -645,6 +813,8 @@ def scan_project(root: str | Path) -> ProjectReport:
         languages[language] += 1
         todos = extract_todos(rel_path, text)
         lines = text.count("\n") + (1 if text else 0)
+        health_details, code_health_score = code_health_score_for(path, text)
+        file_findings = detect_security_findings(rel_path, text)
         report = FileReport(
             path=rel_path,
             language=language,
@@ -654,6 +824,8 @@ def scan_project(root: str | Path) -> ProjectReport:
             authors=git_authors.get(rel_path, []),
             outgoing_dependencies=extract_dependencies(path, text),
             todos=todos,
+            health_details=health_details,
+            code_health_score=code_health_score,
         )
         if lines > 500:
             report.warnings.append("large-file")
@@ -663,8 +835,11 @@ def scan_project(root: str | Path) -> ProjectReport:
             report.warnings.append("temporary-naming")
         if git_churn.get(rel_path, 0) >= 5:
             report.warnings.append("high-churn")
+        if code_health_score < 60:
+            report.warnings.append("low-code-health")
         file_reports.append(report)
         all_todos.extend(todos)
+        security_findings.extend(file_findings)
         file_set.add(rel_path)
 
     path_map = {report.path: report for report in file_reports}
@@ -682,7 +857,7 @@ def scan_project(root: str | Path) -> ProjectReport:
             report.warnings.append("doc-without-linked-code")
         report.hotspot_score = compute_hotspot(report, doc_issue_count_by_file[report.path]) + min(
             git_churn.get(report.path, 0), 8
-        )
+        ) + max((100 - report.code_health_score) // 10, 0)
 
     ranked = sorted(file_reports, key=lambda item: (-item.hotspot_score, item.path))
     summary = Summary(
@@ -692,10 +867,10 @@ def scan_project(root: str | Path) -> ProjectReport:
         languages=dict(sorted(languages.items())),
         total_dependencies=len(edges),
         todo_count=len(all_todos),
-        warning_count=sum(len(item.warnings) for item in file_reports) + len(doc_issues) + len(rule_violations) + len(cycles),
+        warning_count=sum(len(item.warnings) for item in file_reports) + len(doc_issues) + len(rule_violations) + len(security_findings) + len(cycles),
         hottest_files=[item.path for item in ranked[:5]],
     )
-    insights = generate_insights(summary, file_reports, doc_issues, rule_violations, cycles)
+    insights = generate_insights(summary, file_reports, doc_issues, rule_violations, security_findings, cycles)
     owner_counter = Counter(owner for item in file_reports for owner in item.owners)
     author_counter = Counter(author for item in file_reports for author in item.authors)
     return ProjectReport(
@@ -704,6 +879,7 @@ def scan_project(root: str | Path) -> ProjectReport:
         todos=all_todos,
         doc_issues=doc_issues,
         rule_violations=rule_violations,
+        security_findings=security_findings,
         cycles=cycles,
         graph={"nodes": [{"id": item.path, "language": item.language} for item in file_reports], "edges": edges},
         insights=insights,
@@ -756,20 +932,20 @@ def report_to_markdown(report: ProjectReport) -> str:
             "",
             "## Hotspots",
             "",
-            "| Path | Language | Lines | Deps | TODOs | Score |",
-            "| --- | --- | ---: | ---: | ---: | ---: |",
+            "| Path | Language | Lines | Deps | TODOs | Health | Score |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for item in report.files[:15]:
         lines.append(
             f"| `{item.path}` | {item.language} | {item.lines} | {len(item.outgoing_dependencies)} | "
-            f"{len(item.todos)} | {item.hotspot_score} | {', '.join(item.owners) or '-'} |"
+            f"{len(item.todos)} | {item.code_health_score} | {item.hotspot_score} | {', '.join(item.owners) or '-'} |"
         )
-    lines[lines.index("| Path | Language | Lines | Deps | TODOs | Score |")] = (
-        "| Path | Language | Lines | Deps | TODOs | Score | Owners |"
+    lines[lines.index("| Path | Language | Lines | Deps | TODOs | Health | Score |")] = (
+        "| Path | Language | Lines | Deps | TODOs | Health | Score | Owners |"
     )
-    lines[lines.index("| --- | --- | ---: | ---: | ---: | ---: |")] = (
-        "| --- | --- | ---: | ---: | ---: | ---: | --- |"
+    lines[lines.index("| --- | --- | ---: | ---: | ---: | ---: | ---: |")] = (
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
     )
     if report.doc_issues:
         lines.extend(["", "## Documentation Drift", ""])
@@ -781,6 +957,12 @@ def report_to_markdown(report: ProjectReport) -> str:
         lines.extend(
             f"- `{item.rule}`: `{item.source}` -> `{item.target}` ({item.severity})"
             for item in report.rule_violations[:20]
+        )
+    if report.security_findings:
+        lines.extend(["", "## Security And Manifest Risks", ""])
+        lines.extend(
+            f"- `{item.kind}` in `{item.path}:{item.line}` ({item.severity}): {item.message}"
+            for item in report.security_findings[:20]
         )
     if report.cycles:
         lines.extend(["", "## Dependency Cycles", ""])
@@ -847,6 +1029,22 @@ def report_to_sarif(report: ProjectReport) -> str:
                 ],
             }
         )
+    for finding in report.security_findings:
+        results.append(
+            {
+                "ruleId": f"codeatlas.security.{finding.kind}",
+                "level": finding.severity,
+                "message": {"text": finding.message},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": finding.path},
+                            "region": {"startLine": finding.line},
+                        }
+                    }
+                ],
+            }
+        )
     for item in report.files:
         for warning in item.warnings:
             results.append(
@@ -880,6 +1078,7 @@ def report_to_sarif(report: ProjectReport) -> str:
                             {"id": "codeatlas.todo.note", "name": "NOTE marker"},
                             {"id": "codeatlas.doc.missing-reference", "name": "Missing doc reference"},
                             {"id": "codeatlas.arch.rule", "name": "Architectural rule violation"},
+                            {"id": "codeatlas.security.finding", "name": "Security or manifest risk"},
                         ],
                     }
                 },
@@ -1036,6 +1235,8 @@ def load_report(path: str | Path) -> ProjectReport:
                 incoming_dependencies=item.get("incoming_dependencies", []),
                 todos=todos,
                 warnings=item.get("warnings", []),
+                health_details=item.get("health_details", {}),
+                code_health_score=item.get("code_health_score", 100),
                 hotspot_score=item.get("hotspot_score", 0),
             )
         )
@@ -1045,6 +1246,7 @@ def load_report(path: str | Path) -> ProjectReport:
         todos=[TodoItem(**item) for item in payload.get("todos", [])],
         doc_issues=[DocIssue(**item) for item in payload.get("doc_issues", [])],
         rule_violations=[RuleViolation(**item) for item in payload.get("rule_violations", [])],
+        security_findings=[SecurityFinding(**item) for item in payload.get("security_findings", [])],
         cycles=payload.get("cycles", []),
         graph=payload.get("graph", {"nodes": [], "edges": []}),
         insights=payload.get("insights", []),
@@ -1089,6 +1291,7 @@ def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectRep
         todos=todos,
         doc_issues=doc_issues,
         rule_violations=[item for item in report.rule_violations if item.source in normalized or item.target in normalized],
+        security_findings=[item for item in report.security_findings if item.path in normalized],
         cycles=[cycle for cycle in report.cycles if any(node in normalized for node in cycle)],
         graph={"nodes": nodes, "edges": edges},
         insights=insights,

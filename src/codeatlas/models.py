@@ -28,6 +28,15 @@ class RuleViolation:
 
 
 @dataclass(slots=True)
+class SecurityFinding:
+    kind: str
+    severity: str
+    path: str
+    line: int
+    message: str
+
+
+@dataclass(slots=True)
 class FileReport:
     path: str
     language: str
@@ -39,6 +48,8 @@ class FileReport:
     incoming_dependencies: list[str] = field(default_factory=list)
     todos: list[TodoItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    health_details: dict[str, int] = field(default_factory=dict)
+    code_health_score: int = 100
     hotspot_score: int = 0
 
     def to_dict(self) -> dict:
@@ -66,6 +77,7 @@ class ProjectReport:
     todos: list[TodoItem]
     doc_issues: list[DocIssue]
     rule_violations: list[RuleViolation]
+    security_findings: list[SecurityFinding]
     cycles: list[list[str]]
     graph: dict[str, list[dict[str, str]]]
     insights: list[str]
@@ -80,6 +92,7 @@ class ProjectReport:
             "todos": [asdict(item) for item in self.todos],
             "doc_issues": [asdict(item) for item in self.doc_issues],
             "rule_violations": [asdict(item) for item in self.rule_violations],
+            "security_findings": [asdict(item) for item in self.security_findings],
             "cycles": self.cycles,
             "graph": self.graph,
             "insights": self.insights,

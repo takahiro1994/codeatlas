@@ -179,6 +179,22 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(detect_base_ref(FIXTURE_ROOT.parent) in {"origin/main", "main", "origin/master", "master", "HEAD~1"})
         self.assertIsInstance(list_worktree_files(FIXTURE_ROOT.parent), list)
 
+    def test_security_and_health_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text(
+                "import subprocess\nAPI_KEY = 'abcd1234SECRET'\n"
+                "def run(cmd):\n    if cmd:\n        if len(cmd) > 1:\n            subprocess.run(cmd, shell=True)\n",
+                encoding="utf-8",
+            )
+            (root / "requirements.txt").write_text("requests>=2.0\n", encoding="utf-8")
+            report = scan_project(root)
+            app = next(item for item in report.files if item.path == "app.py")
+            self.assertLess(app.code_health_score, 100)
+            self.assertTrue(any(item.kind == "possible-secret" for item in report.security_findings))
+            self.assertTrue(any(item.kind == "shell-true" for item in report.security_findings))
+            self.assertTrue(any(item.kind == "unpinned-python-dependency" for item in report.security_findings))
+
 
 if __name__ == "__main__":
     unittest.main()

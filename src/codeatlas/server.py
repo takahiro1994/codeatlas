@@ -9,8 +9,25 @@ from urllib.parse import parse_qs, urlparse
 from .scanner import scan_project
 
 
+def derive_reviewers(report: dict) -> list[dict]:
+    scores: dict[str, int] = {}
+    for item in report.get("files", []):
+        weight = max(item.get("hotspot_score", 0), 1)
+        for owner in item.get("owners", []):
+            scores[owner] = scores.get(owner, 0) + weight + 3
+        for author in item.get("authors", []):
+            if author in {"Not Committed Yet", "Unknown"}:
+                continue
+            scores[author] = scores.get(author, 0) + weight
+    return [
+        {"candidate": candidate, "score": score}
+        for candidate, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
 def render_dashboard(root: str) -> str:
     report = scan_project(root).to_dict()
+    report["reviewers"] = derive_reviewers(report)
     payload = json.dumps(report)
     insight_cards = "".join(f"<li>{html.escape(item)}</li>" for item in report["insights"])
     owner_rows = "".join(
@@ -19,6 +36,28 @@ def render_dashboard(root: str) -> str:
         f"<td>{item['files']}</td>"
         "</tr>"
         for item in report.get("owners", [])[:10]
+    )
+    author_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(item['author'])}</td>"
+        f"<td>{item['files']}</td>"
+        "</tr>"
+        for item in report.get("authors", [])[:10]
+    )
+    reviewer_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(item['candidate'])}</td>"
+        f"<td>{item['score']}</td>"
+        "</tr>"
+        for item in report.get("reviewers", [])[:10]
+    )
+    risk_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(item['kind'])}</td>"
+        f"<td>{html.escape(item['path'])}:{item['line']}</td>"
+        f"<td>{html.escape(item['message'])}</td>"
+        "</tr>"
+        for item in report.get("security_findings", [])[:12]
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -225,7 +264,7 @@ def render_dashboard(root: str) -> str:
         </div>
         <table>
           <thead>
-            <tr><th>Path</th><th>Lang</th><th>Owners</th><th>Lines</th><th>Deps</th><th>TODOs</th><th>Score</th></tr>
+            <tr><th>Path</th><th>Lang</th><th>Owners</th><th>Lines</th><th>Deps</th><th>TODOs</th><th>Health</th><th>Score</th></tr>
           </thead>
           <tbody id="hotspot-body"></tbody>
         </table>
@@ -264,6 +303,33 @@ def render_dashboard(root: str) -> str:
         <h2>Review Angle</h2>
         <div class="meta">Pair hotspot rank with ownership to see who is likely to review or absorb risk.</div>
         <div class="meta" id="rules-summary" style="margin-top:12px;"></div>
+        <table style="margin-top:16px;">
+          <thead>
+            <tr><th>Reviewer</th><th>Score</th></tr>
+          </thead>
+          <tbody>{reviewer_rows or '<tr><td colspan="2">Use the `reviewers` CLI for changed-surface suggestions.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="owners-grid">
+      <div class="panel table-wrap">
+        <h2>Blame Authors</h2>
+        <table>
+          <thead>
+            <tr><th>Author</th><th>Files</th></tr>
+          </thead>
+          <tbody>{author_rows or '<tr><td colspan="2">No blame data available.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="panel table-wrap">
+        <h2>Security Feed</h2>
+        <table>
+          <thead>
+            <tr><th>Kind</th><th>Location</th><th>Detail</th></tr>
+          </thead>
+          <tbody>{risk_rows or '<tr><td colspan="3">No security or manifest risks detected.</td></tr>'}</tbody>
+        </table>
       </div>
     </section>
 
@@ -317,9 +383,9 @@ def render_dashboard(root: str) -> str:
       const rows = report.files
         .filter(item => !filter || item.path.toLowerCase().includes(filter) || (item.owners || []).join(" ").toLowerCase().includes(filter))
         .slice(0, limit)
-        .map(item => `<tr><td>${{item.path}}</td><td>${{item.language}}</td><td>${{(item.owners || []).join(", ") || "unowned"}}</td><td>${{item.lines}}</td><td>${{item.outgoing_dependencies.length}}</td><td>${{item.todos.length}}</td><td>${{item.hotspot_score}}</td></tr>`)
+        .map(item => `<tr><td>${{item.path}}</td><td>${{item.language}}</td><td>${{(item.owners || []).join(", ") || "unowned"}}</td><td>${{item.lines}}</td><td>${{item.outgoing_dependencies.length}}</td><td>${{item.todos.length}}</td><td>${{item.code_health_score ?? 100}}</td><td>${{item.hotspot_score}}</td></tr>`)
         .join("");
-      byId("hotspot-body").innerHTML = rows || '<tr><td colspan="7">No files match the filter.</td></tr>';
+      byId("hotspot-body").innerHTML = rows || '<tr><td colspan="8">No files match the filter.</td></tr>';
     }};
     const renderTodos = () => {{
       const filter = byId("todo-filter").value.toLowerCase();
@@ -389,7 +455,7 @@ def render_dashboard(root: str) -> str:
         svg.appendChild(group);
       }});
     }};
-    byId("rules-summary").textContent = `Rules: ${{report.rule_violations.length}} violations, cycles: ${{report.cycles.length}}.`;
+    byId("rules-summary").textContent = `Rules: ${{report.rule_violations.length}} violations, cycles: ${{report.cycles.length}}, risks: ${{(report.security_findings || []).length}}.`;
     const loadFile = async () => {{
       const path = picker.value;
       if (!path) return;

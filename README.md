@@ -7,6 +7,7 @@ CodeAtlas is a local-first repository intelligence workbench. Point it at any co
 - git-aware churn scoring when the target is a git repository
 - documentation drift detection for broken local file references
 - config-driven structural rules and dependency cycle detection
+- lightweight code health scoring and security/manifest risk detection
 - a built-in dashboard served with the Python standard library
 
 The project is intentionally dependency-light so it can run in constrained environments.
@@ -58,6 +59,7 @@ codeatlas demo
 - broken local references inside docs
 - CODEOWNERS-based ownership overlays when a repository defines them
 - config-defined architectural rule violations and local dependency cycles
+- lightweight code health metrics and secret / manifest risk findings
 
 ### Output
 
@@ -70,6 +72,7 @@ codeatlas demo
 - interactive file drilldown with inline source preview
 - ownership load table driven by `CODEOWNERS`
 - client-side filtering and display limits for hotspots, TODOs, and graph nodes
+- blame authors, reviewer hints, and security feed panels
 
 ### Configuration
 

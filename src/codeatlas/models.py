@@ -37,6 +37,13 @@ class SecurityFinding:
 
 
 @dataclass(slots=True)
+class DuplicateBlock:
+    fingerprint: str
+    occurrences: list[dict[str, int | str]]
+    line_count: int
+
+
+@dataclass(slots=True)
 class FileReport:
     path: str
     language: str
@@ -78,6 +85,7 @@ class ProjectReport:
     doc_issues: list[DocIssue]
     rule_violations: list[RuleViolation]
     security_findings: list[SecurityFinding]
+    duplicate_blocks: list[DuplicateBlock]
     cycles: list[list[str]]
     graph: dict[str, list[dict[str, str]]]
     insights: list[str]
@@ -93,6 +101,7 @@ class ProjectReport:
             "doc_issues": [asdict(item) for item in self.doc_issues],
             "rule_violations": [asdict(item) for item in self.rule_violations],
             "security_findings": [asdict(item) for item in self.security_findings],
+            "duplicate_blocks": [asdict(item) for item in self.duplicate_blocks],
             "cycles": self.cycles,
             "graph": self.graph,
             "insights": self.insights,

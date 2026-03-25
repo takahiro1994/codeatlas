@@ -59,6 +59,14 @@ def render_dashboard(root: str) -> str:
         "</tr>"
         for item in report.get("security_findings", [])[:12]
     )
+    duplicate_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(item['fingerprint'])}</td>"
+        f"<td>{item['line_count']}</td>"
+        f"<td>{html.escape(', '.join(str(occ['path']) + ':' + str(occ['line']) for occ in item['occurrences'][:3]))}</td>"
+        "</tr>"
+        for item in report.get("duplicate_blocks", [])[:10]
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -330,6 +338,22 @@ def render_dashboard(root: str) -> str:
           </thead>
           <tbody>{risk_rows or '<tr><td colspan="3">No security or manifest risks detected.</td></tr>'}</tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="owners-grid">
+      <div class="panel table-wrap">
+        <h2>Duplicate Code</h2>
+        <table>
+          <thead>
+            <tr><th>Fingerprint</th><th>Lines</th><th>Occurrences</th></tr>
+          </thead>
+          <tbody>{duplicate_rows or '<tr><td colspan="3">No duplicate clusters detected.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="panel table-wrap">
+        <h2>Health Angle</h2>
+        <div class="meta">Hotspot score now includes a code-health penalty and duplicate-code pressure.</div>
       </div>
     </section>
 

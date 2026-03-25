@@ -195,6 +195,29 @@ class ScannerTests(unittest.TestCase):
             self.assertTrue(any(item.kind == "shell-true" for item in report.security_findings))
             self.assertTrue(any(item.kind == "unpinned-python-dependency" for item in report.security_findings))
 
+    def test_duplicate_blocks_and_security_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "a.py"
+            second = root / "b.py"
+            duplicated = (
+                "def shared():\n"
+                "    value = 1\n"
+                "    total = value + 2\n"
+                "    total = total * 3\n"
+                "    total = total - 4\n"
+                "    return total\n"
+            )
+            first.write_text(duplicated + "\nAPI_KEY = 'abcdef123456'\n", encoding="utf-8")
+            second.write_text(duplicated, encoding="utf-8")
+            (root / "codeatlas.json").write_text(
+                json.dumps({"security": {"ignore_kinds": ["possible-secret"]}}),
+                encoding="utf-8",
+            )
+            report = scan_project(root)
+            self.assertGreaterEqual(len(report.duplicate_blocks), 1)
+            self.assertFalse(any(item.kind == "possible-secret" for item in report.security_findings))
+
 
 if __name__ == "__main__":
     unittest.main()

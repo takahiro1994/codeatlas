@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -9,7 +10,17 @@ from collections import Counter, defaultdict
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .models import DocIssue, FileReport, ProjectReport, ReportDelta, RuleViolation, SecurityFinding, Summary, TodoItem
+from .models import (
+    DocIssue,
+    DuplicateBlock,
+    FileReport,
+    ProjectReport,
+    ReportDelta,
+    RuleViolation,
+    SecurityFinding,
+    Summary,
+    TodoItem,
+)
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "Python",
@@ -89,8 +100,9 @@ def load_config(root: Path) -> dict:
         payload["path"] = str(path.relative_to(root))
         payload.setdefault("rules", [])
         payload.setdefault("layers", [])
+        payload.setdefault("security", {})
         return payload
-    return {"path": None, "rules": [], "layers": [], "errors": []}
+    return {"path": None, "rules": [], "layers": [], "security": {}, "errors": []}
 
 
 def should_skip(path: Path) -> bool:
@@ -286,6 +298,53 @@ def detect_security_findings(rel_path: str, text: str) -> list[SecurityFinding]:
     return findings
 
 
+def apply_security_config(findings: list[SecurityFinding], config: dict) -> list[SecurityFinding]:
+    security = config.get("security", {})
+    ignored_kinds = set(security.get("ignore_kinds", []))
+    ignored_paths = security.get("ignore_paths", [])
+    min_severity = security.get("min_severity")
+    severity_rank = {"note": 0, "warning": 1, "error": 2}
+    filtered: list[SecurityFinding] = []
+    for item in findings:
+        if item.kind in ignored_kinds:
+            continue
+        if matches_any_prefix(item.path, ignored_paths):
+            continue
+        if min_severity and severity_rank.get(item.severity, 0) < severity_rank.get(min_severity, 0):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def detect_duplicate_blocks(file_texts: dict[str, str], window: int = 6) -> list[DuplicateBlock]:
+    buckets: defaultdict[str, list[dict[str, int | str]]] = defaultdict(list)
+    for path, text in file_texts.items():
+        suffix = Path(path).suffix.lower()
+        if suffix not in {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".kt", ".c", ".cpp", ".h", ".hpp"}:
+            continue
+        lines = text.splitlines()
+        if len(lines) < window:
+            continue
+        for index in range(0, len(lines) - window + 1):
+            chunk = lines[index : index + window]
+            normalized = [
+                re.sub(r"\s+", " ", line.strip())
+                for line in chunk
+                if line.strip() and not line.strip().startswith(("#", "//", "*", "/*"))
+            ]
+            if len(normalized) < window:
+                continue
+            fingerprint = hashlib.sha1("\n".join(normalized).encode("utf-8")).hexdigest()[:12]
+            buckets[fingerprint].append({"path": path, "line": index + 1})
+    duplicates: list[DuplicateBlock] = []
+    for fingerprint, occurrences in sorted(buckets.items()):
+        unique_paths = {item["path"] for item in occurrences}
+        if len(occurrences) < 2 or len(unique_paths) < 2:
+            continue
+        duplicates.append(DuplicateBlock(fingerprint=fingerprint, occurrences=occurrences[:10], line_count=window))
+    return duplicates
+
+
 def detect_python_security_findings(rel_path: str, text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     try:
@@ -352,6 +411,8 @@ def extract_dependencies(path: Path, text: str) -> list[str]:
 def extract_todos(rel_path: str, text: str) -> list[TodoItem]:
     items: list[TodoItem] = []
     suffix = Path(rel_path).suffix.lower()
+    if suffix in {".json", ".toml"}:
+        return items
     for line_number, line in enumerate(text.splitlines(), start=1):
         candidate = extract_comment_text(line, suffix)
         if not candidate:
@@ -757,6 +818,7 @@ def generate_insights(
     doc_issues: list[DocIssue],
     rule_violations: list[RuleViolation],
     security_findings: list[SecurityFinding],
+    duplicate_blocks: list[DuplicateBlock],
     cycles: list[list[str]],
 ) -> list[str]:
     insights: list[str] = []
@@ -770,6 +832,8 @@ def generate_insights(
         insights.append(f"{len(rule_violations)} structural rule violations were detected.")
     if security_findings:
         insights.append(f"{len(security_findings)} security or manifest risk findings were detected.")
+    if duplicate_blocks:
+        insights.append(f"{len(duplicate_blocks)} duplicate code clusters were detected.")
     if cycles:
         insights.append(f"{len(cycles)} dependency cycles were detected.")
     if summary.hottest_files:
@@ -800,6 +864,7 @@ def scan_project(root: str | Path) -> ProjectReport:
     languages = Counter()
     all_todos: list[TodoItem] = []
     file_set: set[str] = set()
+    file_texts: dict[str, str] = {}
     git_churn = load_git_churn(root_path)
     codeowners = load_codeowners(root_path)
     git_authors = load_git_authors(root_path)
@@ -841,12 +906,15 @@ def scan_project(root: str | Path) -> ProjectReport:
         all_todos.extend(todos)
         security_findings.extend(file_findings)
         file_set.add(rel_path)
+        file_texts[rel_path] = text
 
     path_map = {report.path: report for report in file_reports}
     edges = resolve_local_edges(file_reports, path_map)
     cycles = detect_cycles(edges)
     rule_violations = evaluate_rules(edges, config)
     rule_violations.extend(evaluate_layers(edges, config))
+    security_findings = apply_security_config(security_findings, config)
+    duplicate_blocks = detect_duplicate_blocks(file_texts)
     doc_issues = analyze_docs(root_path, file_set)
     doc_issue_count_by_file = defaultdict(int)
     for issue in doc_issues:
@@ -858,6 +926,10 @@ def scan_project(root: str | Path) -> ProjectReport:
         report.hotspot_score = compute_hotspot(report, doc_issue_count_by_file[report.path]) + min(
             git_churn.get(report.path, 0), 8
         ) + max((100 - report.code_health_score) // 10, 0)
+        duplicate_hits = sum(1 for block in duplicate_blocks if any(hit["path"] == report.path for hit in block.occurrences))
+        if duplicate_hits:
+            report.warnings.append("duplicate-code")
+            report.hotspot_score += duplicate_hits * 2
 
     ranked = sorted(file_reports, key=lambda item: (-item.hotspot_score, item.path))
     summary = Summary(
@@ -867,10 +939,10 @@ def scan_project(root: str | Path) -> ProjectReport:
         languages=dict(sorted(languages.items())),
         total_dependencies=len(edges),
         todo_count=len(all_todos),
-        warning_count=sum(len(item.warnings) for item in file_reports) + len(doc_issues) + len(rule_violations) + len(security_findings) + len(cycles),
+        warning_count=sum(len(item.warnings) for item in file_reports) + len(doc_issues) + len(rule_violations) + len(security_findings) + len(duplicate_blocks) + len(cycles),
         hottest_files=[item.path for item in ranked[:5]],
     )
-    insights = generate_insights(summary, file_reports, doc_issues, rule_violations, security_findings, cycles)
+    insights = generate_insights(summary, file_reports, doc_issues, rule_violations, security_findings, duplicate_blocks, cycles)
     owner_counter = Counter(owner for item in file_reports for owner in item.owners)
     author_counter = Counter(author for item in file_reports for author in item.authors)
     return ProjectReport(
@@ -880,6 +952,7 @@ def scan_project(root: str | Path) -> ProjectReport:
         doc_issues=doc_issues,
         rule_violations=rule_violations,
         security_findings=security_findings,
+        duplicate_blocks=duplicate_blocks,
         cycles=cycles,
         graph={"nodes": [{"id": item.path, "language": item.language} for item in file_reports], "edges": edges},
         insights=insights,
@@ -964,6 +1037,11 @@ def report_to_markdown(report: ProjectReport) -> str:
             f"- `{item.kind}` in `{item.path}:{item.line}` ({item.severity}): {item.message}"
             for item in report.security_findings[:20]
         )
+    if report.duplicate_blocks:
+        lines.extend(["", "## Duplicate Code", ""])
+        for block in report.duplicate_blocks[:12]:
+            refs = ", ".join(f"{item['path']}:{item['line']}" for item in block.occurrences[:4])
+            lines.append(f"- `{block.fingerprint}` ({block.line_count} lines): {refs}")
     if report.cycles:
         lines.extend(["", "## Dependency Cycles", ""])
         lines.extend(f"- {' -> '.join(item)}" for item in report.cycles[:12])
@@ -1247,6 +1325,7 @@ def load_report(path: str | Path) -> ProjectReport:
         doc_issues=[DocIssue(**item) for item in payload.get("doc_issues", [])],
         rule_violations=[RuleViolation(**item) for item in payload.get("rule_violations", [])],
         security_findings=[SecurityFinding(**item) for item in payload.get("security_findings", [])],
+        duplicate_blocks=[DuplicateBlock(**item) for item in payload.get("duplicate_blocks", [])],
         cycles=payload.get("cycles", []),
         graph=payload.get("graph", {"nodes": [], "edges": []}),
         insights=payload.get("insights", []),
@@ -1292,6 +1371,7 @@ def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectRep
         doc_issues=doc_issues,
         rule_violations=[item for item in report.rule_violations if item.source in normalized or item.target in normalized],
         security_findings=[item for item in report.security_findings if item.path in normalized],
+        duplicate_blocks=[item for item in report.duplicate_blocks if any(hit["path"] in normalized for hit in item.occurrences)],
         cycles=[cycle for cycle in report.cycles if any(node in normalized for node in cycle)],
         graph={"nodes": nodes, "edges": edges},
         insights=insights,

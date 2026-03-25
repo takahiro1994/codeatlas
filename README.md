@@ -8,6 +8,7 @@ CodeAtlas is a local-first repository intelligence workbench. Point it at any co
 - documentation drift detection for broken local file references
 - config-driven structural rules and dependency cycle detection
 - lightweight code health scoring and security/manifest risk detection
+- duplicate code cluster detection across files
 - a built-in dashboard served with the Python standard library
 
 The project is intentionally dependency-light so it can run in constrained environments.
@@ -60,6 +61,7 @@ codeatlas demo
 - CODEOWNERS-based ownership overlays when a repository defines them
 - config-defined architectural rule violations and local dependency cycles
 - lightweight code health metrics and secret / manifest risk findings
+- duplicate code clusters across multiple files
 
 ### Output
 
@@ -73,6 +75,7 @@ codeatlas demo
 - ownership load table driven by `CODEOWNERS`
 - client-side filtering and display limits for hotspots, TODOs, and graph nodes
 - blame authors, reviewer hints, and security feed panels
+- duplicate-code clusters in report output
 
 ### Configuration
 
@@ -118,6 +121,20 @@ You can also define coarse-grained layers:
 ```
 
 If `ui` imports `infra`, CodeAtlas reports a structural violation even if the raw import itself resolves successfully.
+
+Security findings are configurable too:
+
+```json
+{
+  "security": {
+    "ignore_paths": ["tests/"],
+    "ignore_kinds": ["possible-secret"],
+    "min_severity": "warning"
+  }
+}
+```
+
+This is useful when test fixtures intentionally contain fake credentials or risky calls.
 
 ### CI And Review Workflows
 

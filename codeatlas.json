@@ -18,6 +18,11 @@
       "may_depend_on": ["runtime"]
     }
   ],
+  "security": {
+    "ignore_paths": ["tests/"],
+    "ignore_kinds": [],
+    "min_severity": "note"
+  },
   "rules": [
     {
       "name": "runtime-must-not-import-tests",

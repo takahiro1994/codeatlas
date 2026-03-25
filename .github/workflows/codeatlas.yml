@@ -41,4 +41,5 @@ jobs:
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           PYTHONPATH=src python -m codeatlas changes . --base "$BASE_SHA" --head "$HEAD_SHA" --markdown --output changed-report.md
+          PYTHONPATH=src python -m codeatlas changes . --base "$BASE_SHA" --head "$HEAD_SHA" --pr-comment --output pr-comment.md
           cat changed-report.md >> "$GITHUB_STEP_SUMMARY"

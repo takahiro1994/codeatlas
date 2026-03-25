@@ -62,6 +62,8 @@ JS_IMPORT_RE = re.compile(
     r"""(?:import\s+.*?from\s+["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\))""",
     re.MULTILINE,
 )
+JS_DYNAMIC_IMPORT_RE = re.compile(r"""import\(\s*["']([^"']+)["']\s*\)""", re.MULTILINE)
+TS_REFERENCE_RE = re.compile(r"""<reference\s+path=["']([^"']+)["']""")
 DOC_PATH_RE = re.compile(r"(?:\[[^\]]+\]\(([^)]+)\)|`([^`]+\.[A-Za-z0-9]+)`)")
 SECRET_RE = re.compile(r"""(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*["']([A-Za-z0-9_\-\/+=]{8,})["']""")
 RISKY_PATTERN_RULES = [
@@ -405,6 +407,15 @@ def extract_dependencies(path: Path, text: str) -> list[str]:
             dep = match.group(1) or match.group(2)
             if dep:
                 deps.append(dep)
+        for match in JS_DYNAMIC_IMPORT_RE.finditer(text):
+            dep = match.group(1)
+            if dep:
+                deps.append(dep)
+        if suffix in {".ts", ".tsx"}:
+            for match in TS_REFERENCE_RE.finditer(text):
+                dep = match.group(1)
+                if dep:
+                    deps.append(dep)
     return sorted(set(deps))
 
 
@@ -1292,6 +1303,39 @@ def format_reviewer_suggestions(report: ProjectReport) -> str:
         return "\n".join(lines)
     for item in suggestions[:10]:
         lines.append(f"- {item['candidate']} ({item['score']}): {', '.join(item['reasons'])}")
+    return "\n".join(lines)
+
+
+def format_pr_comment(report: ProjectReport) -> str:
+    lines = [
+        "## CodeAtlas PR Summary",
+        "",
+        f"- Files: **{report.summary.total_files}**",
+        f"- TODOs: **{report.summary.todo_count}**",
+        f"- Warnings: **{report.summary.warning_count}**",
+        "",
+    ]
+    if report.rule_violations:
+        lines.append("### Structural Issues")
+        lines.extend(f"- `{item.rule}`: `{item.source}` -> `{item.target}`" for item in report.rule_violations[:8])
+        lines.append("")
+    if report.security_findings:
+        lines.append("### Risks")
+        lines.extend(f"- `{item.kind}` at `{item.path}:{item.line}`" for item in report.security_findings[:8])
+        lines.append("")
+    if report.duplicate_blocks:
+        lines.append("### Duplicate Code")
+        lines.extend(
+            f"- `{item.fingerprint}` across {len(item.occurrences)} locations"
+            for item in report.duplicate_blocks[:6]
+        )
+        lines.append("")
+    lines.append("### Reviewer Hints")
+    suggestions = suggest_reviewers(report)
+    if suggestions:
+        lines.extend(f"- `{item['candidate']}` score {item['score']}" for item in suggestions[:6])
+    else:
+        lines.append("- No reviewer candidates found.")
     return "\n".join(lines)
 
 

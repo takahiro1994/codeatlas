@@ -41,6 +41,7 @@ codeatlas scan /path/to/repo --markdown --output report.md
 codeatlas scan /path/to/repo --sarif --output report.sarif
 codeatlas compare baseline.json /path/to/repo
 codeatlas changes /path/to/repo --base main --head HEAD --markdown
+codeatlas changes /path/to/repo --base auto --head HEAD --pr-comment
 codeatlas owners /path/to/repo
 codeatlas reviewers /path/to/repo --base auto --head HEAD
 codeatlas serve /path/to/repo --port 9000
@@ -76,6 +77,7 @@ codeatlas demo
 - client-side filtering and display limits for hotspots, TODOs, and graph nodes
 - blame authors, reviewer hints, and security feed panels
 - duplicate-code clusters in report output
+- PR-comment-ready markdown from `changes --pr-comment`
 
 ### Configuration
 
@@ -141,6 +143,7 @@ This is useful when test fixtures intentionally contain fake credentials or risk
 - `--sarif` exports findings into a format that GitHub code scanning and other CI systems can ingest.
 - `compare` lets you diff a stored baseline report against the current working tree to spot new TODOs, new documentation drift, and worsening hotspots.
 - `changes` narrows the report to files touched between two git refs, which is useful for pull request review.
+- `changes --pr-comment` emits a compact markdown body suitable for PR comments or bot posting.
 - `changes` and `reviewers` accept `--base auto`, which prefers `GITHUB_BASE_REF`, then `origin/main`, `main`, `origin/master`, `master`, and finally `HEAD~1`. If no committed diff is found, they fall back to uncommitted worktree files.
 - hotspot and changed-file views inherit `CODEOWNERS` assignments so review surfaces show likely owners.
 - `owners` prints owner-by-owner load and their hottest files.

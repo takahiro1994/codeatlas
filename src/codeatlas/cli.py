@@ -9,6 +9,7 @@ from .scanner import (
     detect_base_ref,
     format_delta,
     format_owner_summary,
+    format_pr_comment,
     format_reviewer_suggestions,
     format_summary,
     focus_report_on_paths,
@@ -63,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     changes_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     changes_parser.add_argument("--markdown", action="store_true", help="Emit Markdown instead of text.")
     changes_parser.add_argument("--sarif", action="store_true", help="Emit SARIF instead of text.")
+    changes_parser.add_argument("--pr-comment", action="store_true", help="Emit PR comment markdown instead of text.")
     changes_parser.add_argument("--output", help="Write the focused report to a file.")
 
     serve_parser = subparsers.add_parser("serve", help="Launch the dashboard.")
@@ -134,6 +136,8 @@ def main() -> None:
             if args.markdown
             else report_to_sarif(focused)
             if args.sarif
+            else format_pr_comment(focused)
+            if args.pr_comment
             else format_summary(focused)
         )
         if args.output:

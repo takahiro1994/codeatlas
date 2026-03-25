@@ -11,6 +11,7 @@ from codeatlas.scanner import (
     focus_report_on_paths,
     format_summary,
     format_owner_summary,
+    format_pr_comment,
     format_reviewer_suggestions,
     list_worktree_files,
     load_report,
@@ -217,6 +218,22 @@ class ScannerTests(unittest.TestCase):
             report = scan_project(root)
             self.assertGreaterEqual(len(report.duplicate_blocks), 1)
             self.assertFalse(any(item.kind == "possible-secret" for item in report.security_findings))
+
+    def test_js_ts_dependency_patterns_and_pr_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file_path = root / "app.ts"
+            file_path.write_text(
+                'import x from "./dep";\nconst y = await import("./lazy");\n/// <reference path="./types.d.ts" />\n',
+                encoding="utf-8",
+            )
+            report = scan_project(root)
+            app = next(item for item in report.files if item.path == "app.ts")
+            self.assertIn("./dep", app.outgoing_dependencies)
+            self.assertIn("./lazy", app.outgoing_dependencies)
+            self.assertIn("./types.d.ts", app.outgoing_dependencies)
+            comment = format_pr_comment(report)
+            self.assertIn("## CodeAtlas PR Summary", comment)
 
 
 if __name__ == "__main__":

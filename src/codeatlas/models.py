@@ -67,3 +67,26 @@ class ProjectReport:
             "insights": self.insights,
         }
 
+
+@dataclass(slots=True)
+class ReportDelta:
+    base_root: str
+    current_root: str
+    new_todos: list[TodoItem]
+    resolved_todos: list[TodoItem]
+    new_doc_issues: list[DocIssue]
+    resolved_doc_issues: list[DocIssue]
+    hotspot_regressions: list[dict[str, int | str]]
+    summary_lines: list[str]
+
+    def to_dict(self) -> dict:
+        return {
+            "base_root": self.base_root,
+            "current_root": self.current_root,
+            "new_todos": [asdict(item) for item in self.new_todos],
+            "resolved_todos": [asdict(item) for item in self.resolved_todos],
+            "new_doc_issues": [asdict(item) for item in self.new_doc_issues],
+            "resolved_doc_issues": [asdict(item) for item in self.resolved_doc_issues],
+            "hotspot_regressions": self.hotspot_regressions,
+            "summary_lines": self.summary_lines,
+        }

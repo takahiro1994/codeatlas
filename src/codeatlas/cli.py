@@ -3,7 +3,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .scanner import format_summary, report_to_json, report_to_markdown, scan_project
+from .scanner import (
+    compare_reports,
+    format_delta,
+    format_summary,
+    load_report,
+    report_to_json,
+    report_to_markdown,
+    report_to_sarif,
+    scan_project,
+)
 from .server import serve
 
 
@@ -18,7 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
     scan_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     scan_parser.add_argument("--markdown", action="store_true", help="Emit Markdown instead of text.")
+    scan_parser.add_argument("--sarif", action="store_true", help="Emit SARIF instead of text.")
     scan_parser.add_argument("--output", help="Write the report to a file.")
+
+    compare_parser = subparsers.add_parser("compare", help="Compare a baseline report JSON to a current path.")
+    compare_parser.add_argument("baseline", help="Path to a baseline report generated with --json.")
+    compare_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
+    compare_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    compare_parser.add_argument("--output", help="Write the diff report to a file.")
 
     serve_parser = subparsers.add_parser("serve", help="Launch the dashboard.")
     serve_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
@@ -40,8 +56,19 @@ def main() -> None:
             if args.json
             else report_to_markdown(report)
             if args.markdown
+            else report_to_sarif(report)
+            if args.sarif
             else format_summary(report)
         )
+        if args.output:
+            Path(args.output).write_text(output, encoding="utf-8")
+        print(output)
+        return
+    if args.command == "compare":
+        baseline = load_report(args.baseline)
+        current = scan_project(args.path)
+        delta = compare_reports(baseline, current)
+        output = json.dumps(delta.to_dict(), indent=2) if args.json else format_delta(delta)
         if args.output:
             Path(args.output).write_text(output, encoding="utf-8")
         print(output)

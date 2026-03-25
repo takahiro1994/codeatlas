@@ -35,6 +35,8 @@ Then open `http://127.0.0.1:8123`.
 codeatlas scan /path/to/repo
 codeatlas scan /path/to/repo --json --output report.json
 codeatlas scan /path/to/repo --markdown --output report.md
+codeatlas scan /path/to/repo --sarif --output report.sarif
+codeatlas compare baseline.json /path/to/repo
 codeatlas serve /path/to/repo --port 9000
 codeatlas demo
 ```
@@ -61,13 +63,17 @@ codeatlas demo
 - lightweight dependency visualization
 - interactive file drilldown with inline source preview
 
+### CI And Review Workflows
+
+- `--sarif` exports findings into a format that GitHub code scanning and other CI systems can ingest.
+- `compare` lets you diff a stored baseline report against the current working tree to spot new TODOs, new documentation drift, and worsening hotspots.
+
 ## Roadmap
 
-- git-aware churn scoring
 - richer parsers for more languages
-- SARIF and markdown exports
-- interactive file drilldown and inline source previews
 - plugin system for custom heuristics
+- inline code ownership and blame overlays
+- commit range analysis for pull requests
 
 ## Development
 

@@ -7,7 +7,7 @@ import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .models import DocIssue, FileReport, ProjectReport, Summary, TodoItem
+from .models import DocIssue, FileReport, ProjectReport, ReportDelta, Summary, TodoItem
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "Python",
@@ -369,3 +369,177 @@ def report_to_markdown(report: ProjectReport) -> str:
             f"- `{item.label}` in `{item.path}:{item.line}`: {item.text}" for item in report.todos[:20]
         )
     return "\n".join(lines)
+
+
+def report_to_sarif(report: ProjectReport) -> str:
+    results: list[dict] = []
+    for todo in report.todos:
+        results.append(
+            {
+                "ruleId": f"codeatlas.todo.{todo.label.lower()}",
+                "level": "warning" if todo.label in {"TODO", "FIXME", "HACK"} else "note",
+                "message": {"text": f"{todo.label}: {todo.text}"},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": todo.path},
+                            "region": {"startLine": todo.line},
+                        }
+                    }
+                ],
+            }
+        )
+    for issue in report.doc_issues:
+        results.append(
+            {
+                "ruleId": "codeatlas.doc.missing-reference",
+                "level": "warning",
+                "message": {"text": f"{issue.doc_path} references missing file {issue.referenced_path}"},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": issue.doc_path},
+                        }
+                    }
+                ],
+            }
+        )
+    for item in report.files:
+        for warning in item.warnings:
+            results.append(
+                {
+                    "ruleId": f"codeatlas.file.{warning}",
+                    "level": "note",
+                    "message": {"text": f"{item.path} triggered warning {warning}"},
+                    "locations": [
+                        {
+                            "physicalLocation": {
+                                "artifactLocation": {"uri": item.path},
+                            }
+                        }
+                    ],
+                }
+            )
+
+    sarif = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "CodeAtlas",
+                        "informationUri": "https://github.com/takahiro1994/codeatlas",
+                        "rules": [
+                            {"id": "codeatlas.todo.todo", "name": "TODO marker"},
+                            {"id": "codeatlas.todo.fixme", "name": "FIXME marker"},
+                            {"id": "codeatlas.todo.hack", "name": "HACK marker"},
+                            {"id": "codeatlas.todo.note", "name": "NOTE marker"},
+                            {"id": "codeatlas.doc.missing-reference", "name": "Missing doc reference"},
+                        ],
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(sarif, indent=2)
+
+
+def _todo_key(item: TodoItem) -> tuple[str, int, str, str]:
+    return (item.path, item.line, item.label, item.text)
+
+
+def _doc_issue_key(item: DocIssue) -> tuple[str, str, str]:
+    return (item.doc_path, item.referenced_path, item.issue)
+
+
+def compare_reports(base: ProjectReport, current: ProjectReport) -> ReportDelta:
+    base_todos = {_todo_key(item): item for item in base.todos}
+    current_todos = {_todo_key(item): item for item in current.todos}
+    base_docs = {_doc_issue_key(item): item for item in base.doc_issues}
+    current_docs = {_doc_issue_key(item): item for item in current.doc_issues}
+    base_hotspots = {item.path: item.hotspot_score for item in base.files}
+    current_hotspots = {item.path: item.hotspot_score for item in current.files}
+
+    new_todos = [current_todos[key] for key in sorted(current_todos.keys() - base_todos.keys())]
+    resolved_todos = [base_todos[key] for key in sorted(base_todos.keys() - current_todos.keys())]
+    new_doc_issues = [current_docs[key] for key in sorted(current_docs.keys() - base_docs.keys())]
+    resolved_doc_issues = [base_docs[key] for key in sorted(base_docs.keys() - current_docs.keys())]
+
+    hotspot_regressions = []
+    for path, current_score in sorted(current_hotspots.items()):
+        base_score = base_hotspots.get(path)
+        if base_score is None or current_score <= base_score:
+            continue
+        hotspot_regressions.append(
+            {"path": path, "base_score": base_score, "current_score": current_score, "delta": current_score - base_score}
+        )
+
+    summary_lines = [
+        f"New TODOs: {len(new_todos)}",
+        f"Resolved TODOs: {len(resolved_todos)}",
+        f"New doc issues: {len(new_doc_issues)}",
+        f"Resolved doc issues: {len(resolved_doc_issues)}",
+        f"Hotspot regressions: {len(hotspot_regressions)}",
+    ]
+    return ReportDelta(
+        base_root=base.summary.root,
+        current_root=current.summary.root,
+        new_todos=new_todos,
+        resolved_todos=resolved_todos,
+        new_doc_issues=new_doc_issues,
+        resolved_doc_issues=resolved_doc_issues,
+        hotspot_regressions=hotspot_regressions,
+        summary_lines=summary_lines,
+    )
+
+
+def format_delta(delta: ReportDelta) -> str:
+    lines = [
+        f"Base: {delta.base_root}",
+        f"Current: {delta.current_root}",
+        *delta.summary_lines,
+    ]
+    if delta.new_todos:
+        lines.append("New TODO markers:")
+        lines.extend(f"- {item.label} {item.path}:{item.line} {item.text}" for item in delta.new_todos[:10])
+    if delta.new_doc_issues:
+        lines.append("New doc issues:")
+        lines.extend(f"- {item.doc_path} -> {item.referenced_path}" for item in delta.new_doc_issues[:10])
+    if delta.hotspot_regressions:
+        lines.append("Hotspot regressions:")
+        lines.extend(
+            f"- {item['path']}: {item['base_score']} -> {item['current_score']}"
+            for item in delta.hotspot_regressions[:10]
+        )
+    return "\n".join(lines)
+
+
+def load_report(path: str | Path) -> ProjectReport:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    summary = Summary(**payload["summary"])
+    files = []
+    for item in payload["files"]:
+        todos = [TodoItem(**todo) for todo in item.get("todos", [])]
+        files.append(
+            FileReport(
+                path=item["path"],
+                language=item["language"],
+                lines=item["lines"],
+                size_bytes=item["size_bytes"],
+                outgoing_dependencies=item.get("outgoing_dependencies", []),
+                incoming_dependencies=item.get("incoming_dependencies", []),
+                todos=todos,
+                warnings=item.get("warnings", []),
+                hotspot_score=item.get("hotspot_score", 0),
+            )
+        )
+    return ProjectReport(
+        summary=summary,
+        files=files,
+        todos=[TodoItem(**item) for item in payload.get("todos", [])],
+        doc_issues=[DocIssue(**item) for item in payload.get("doc_issues", [])],
+        graph=payload.get("graph", {"nodes": [], "edges": []}),
+        insights=payload.get("insights", []),
+    )

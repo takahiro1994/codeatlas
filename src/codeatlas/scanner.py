@@ -321,6 +321,30 @@ def list_changed_files(root: str | Path, base_ref: str = "HEAD~1", head_ref: str
     return changed
 
 
+def load_git_authors(root: Path) -> dict[str, list[str]]:
+    if not (root / ".git").exists():
+        return {}
+    authors_by_file: dict[str, list[str]] = {}
+    for path in iter_files(root):
+        rel_path = str(path.relative_to(root))
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root), "blame", "--line-porcelain", rel_path],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        counter: Counter[str] = Counter()
+        for line in proc.stdout.splitlines():
+            if line.startswith("author "):
+                counter[line[7:].strip()] += 1
+        if counter:
+            authors_by_file[rel_path] = [name for name, _ in counter.most_common(3)]
+    return authors_by_file
+
+
 def generate_insights(summary: Summary, files: list[FileReport], doc_issues: list[DocIssue]) -> list[str]:
     insights: list[str] = []
     if summary.total_files == 0:
@@ -344,6 +368,10 @@ def generate_insights(summary: Summary, files: list[FileReport], doc_issues: lis
     if owner_counter:
         owner, count = owner_counter.most_common(1)[0]
         insights.append(f"Most loaded owner: {owner} across {count} tracked files.")
+    author_counter = Counter(author for item in files for author in item.authors)
+    if author_counter:
+        author, count = author_counter.most_common(1)[0]
+        insights.append(f"Most visible author in blame data: {author} across {count} tracked files.")
     return insights
 
 
@@ -355,6 +383,7 @@ def scan_project(root: str | Path) -> ProjectReport:
     file_set: set[str] = set()
     git_churn = load_git_churn(root_path)
     codeowners = load_codeowners(root_path)
+    git_authors = load_git_authors(root_path)
 
     for path in iter_files(root_path):
         rel_path = str(path.relative_to(root_path))
@@ -369,6 +398,7 @@ def scan_project(root: str | Path) -> ProjectReport:
             lines=lines,
             size_bytes=path.stat().st_size,
             owners=match_codeowners(rel_path, codeowners),
+            authors=git_authors.get(rel_path, []),
             outgoing_dependencies=extract_dependencies(path, text),
             todos=todos,
         )
@@ -411,6 +441,7 @@ def scan_project(root: str | Path) -> ProjectReport:
     )
     insights = generate_insights(summary, file_reports, doc_issues)
     owner_counter = Counter(owner for item in file_reports for owner in item.owners)
+    author_counter = Counter(author for item in file_reports for author in item.authors)
     return ProjectReport(
         summary=summary,
         files=ranked,
@@ -419,6 +450,7 @@ def scan_project(root: str | Path) -> ProjectReport:
         graph={"nodes": [{"id": item.path, "language": item.language} for item in file_reports], "edges": edges},
         insights=insights,
         owners=[{"owner": owner, "files": count} for owner, count in owner_counter.most_common()],
+        authors=[{"author": author, "files": count} for author, count in author_counter.most_common()],
     )
 
 
@@ -488,6 +520,9 @@ def report_to_markdown(report: ProjectReport) -> str:
     if report.owners:
         lines.extend(["", "## Ownership", ""])
         lines.extend(f"- `{item['owner']}` owns {item['files']} tracked files" for item in report.owners[:12])
+    if report.authors:
+        lines.extend(["", "## Blame Authors", ""])
+        lines.extend(f"- `{item['author']}` appears in {item['files']} tracked files" for item in report.authors[:12])
     if report.todos:
         lines.extend(["", "## TODO Feed", ""])
         lines.extend(
@@ -645,14 +680,57 @@ def format_owner_summary(report: ProjectReport) -> str:
     lines = [f"Root: {report.summary.root}", "Owners:"]
     if not report.owners:
         lines.append("- No CODEOWNERS file detected.")
-        return "\n".join(lines)
-    files_by_path = {item.path: item for item in report.files}
+        if not report.authors:
+            return "\n".join(lines)
     for owner_info in report.owners[:20]:
         owner = owner_info["owner"]
         owned_files = [item for item in report.files if owner in item.owners]
         hottest = sorted(owned_files, key=lambda item: (-item.hotspot_score, item.path))[:3]
         hottest_text = ", ".join(f"{item.path}({item.hotspot_score})" for item in hottest) or "none"
         lines.append(f"- {owner}: {owner_info['files']} files; hotspots: {hottest_text}")
+    if report.authors:
+        lines.append("Authors:")
+        for author_info in report.authors[:20]:
+            author = author_info["author"]
+            touched_files = [item for item in report.files if author in item.authors]
+            hottest = sorted(touched_files, key=lambda item: (-item.hotspot_score, item.path))[:3]
+            hottest_text = ", ".join(f"{item.path}({item.hotspot_score})" for item in hottest) or "none"
+            lines.append(f"- {author}: {author_info['files']} files; hotspots: {hottest_text}")
+    return "\n".join(lines)
+
+
+def suggest_reviewers(report: ProjectReport) -> list[dict[str, object]]:
+    scores: Counter[str] = Counter()
+    reasons: defaultdict[str, list[str]] = defaultdict(list)
+    ignored_authors = {"Not Committed Yet", "Unknown"}
+    for file in report.files:
+        weight = max(file.hotspot_score, 1)
+        for owner in file.owners:
+            scores[owner] += weight + 3
+            reasons[owner].append(f"owner:{file.path}")
+        for author in file.authors:
+            if author in ignored_authors:
+                continue
+            scores[author] += weight
+            reasons[author].append(f"author:{file.path}")
+    return [
+        {
+            "candidate": candidate,
+            "score": score,
+            "reasons": sorted(set(reasons[candidate]))[:8],
+        }
+        for candidate, score in scores.most_common()
+    ]
+
+
+def format_reviewer_suggestions(report: ProjectReport) -> str:
+    suggestions = suggest_reviewers(report)
+    lines = [f"Root: {report.summary.root}", "Reviewer suggestions:"]
+    if not suggestions:
+        lines.append("- No reviewer candidates found.")
+        return "\n".join(lines)
+    for item in suggestions[:10]:
+        lines.append(f"- {item['candidate']} ({item['score']}): {', '.join(item['reasons'])}")
     return "\n".join(lines)
 
 
@@ -669,6 +747,7 @@ def load_report(path: str | Path) -> ProjectReport:
                 lines=item["lines"],
                 size_bytes=item["size_bytes"],
                 owners=item.get("owners", []),
+                authors=item.get("authors", []),
                 outgoing_dependencies=item.get("outgoing_dependencies", []),
                 incoming_dependencies=item.get("incoming_dependencies", []),
                 todos=todos,
@@ -684,6 +763,7 @@ def load_report(path: str | Path) -> ProjectReport:
         graph=payload.get("graph", {"nodes": [], "edges": []}),
         insights=payload.get("insights", []),
         owners=payload.get("owners", []),
+        authors=payload.get("authors", []),
     )
 
 
@@ -715,6 +795,7 @@ def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectRep
         f"{len(doc_issues)} documentation issues touch the changed surface.",
     ]
     owner_counter = Counter(owner for item in files for owner in item.owners)
+    author_counter = Counter(author for item in files for author in item.authors)
     return ProjectReport(
         summary=summary,
         files=files,
@@ -723,4 +804,5 @@ def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectRep
         graph={"nodes": nodes, "edges": edges},
         insights=insights,
         owners=[{"owner": owner, "files": count} for owner, count in owner_counter.most_common()],
+        authors=[{"author": author, "files": count} for author, count in author_counter.most_common()],
     )

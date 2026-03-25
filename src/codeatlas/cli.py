@@ -8,6 +8,7 @@ from .scanner import (
     compare_reports,
     format_delta,
     format_owner_summary,
+    format_reviewer_suggestions,
     format_summary,
     focus_report_on_paths,
     list_changed_files,
@@ -16,6 +17,7 @@ from .scanner import (
     report_to_markdown,
     report_to_sarif,
     scan_project,
+    suggest_reviewers,
 )
 from .server import serve
 
@@ -44,6 +46,13 @@ def build_parser() -> argparse.ArgumentParser:
     owners_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
     owners_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     owners_parser.add_argument("--output", help="Write the owner report to a file.")
+
+    reviewers_parser = subparsers.add_parser("reviewers", help="Suggest reviewers from owners and git blame.")
+    reviewers_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
+    reviewers_parser.add_argument("--base", default="HEAD~1", help="Base git ref for the diff.")
+    reviewers_parser.add_argument("--head", default="HEAD", help="Head git ref for the diff.")
+    reviewers_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    reviewers_parser.add_argument("--output", help="Write the reviewer suggestions to a file.")
 
     changes_parser = subparsers.add_parser("changes", help="Analyze only files changed between two git refs.")
     changes_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
@@ -93,7 +102,11 @@ def main() -> None:
         return
     if args.command == "owners":
         report = scan_project(args.path)
-        output = json.dumps({"root": report.summary.root, "owners": report.owners}, indent=2) if args.json else format_owner_summary(report)
+        output = (
+            json.dumps({"root": report.summary.root, "owners": report.owners, "authors": report.authors}, indent=2)
+            if args.json
+            else format_owner_summary(report)
+        )
         if args.output:
             Path(args.output).write_text(output, encoding="utf-8")
         print(output)
@@ -117,6 +130,19 @@ def main() -> None:
             else report_to_sarif(focused)
             if args.sarif
             else format_summary(focused)
+        )
+        if args.output:
+            Path(args.output).write_text(output, encoding="utf-8")
+        print(output)
+        return
+    if args.command == "reviewers":
+        report = scan_project(args.path)
+        changed = list_changed_files(args.path, base_ref=args.base, head_ref=args.head)
+        focused = focus_report_on_paths(report, changed)
+        output = (
+            json.dumps({"root": focused.summary.root, "reviewers": suggest_reviewers(focused)}, indent=2)
+            if args.json
+            else format_reviewer_suggestions(focused)
         )
         if args.output:
             Path(args.output).write_text(output, encoding="utf-8")

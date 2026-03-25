@@ -39,6 +39,7 @@ codeatlas scan /path/to/repo --sarif --output report.sarif
 codeatlas compare baseline.json /path/to/repo
 codeatlas changes /path/to/repo --base main --head HEAD --markdown
 codeatlas owners /path/to/repo
+codeatlas reviewers /path/to/repo --base origin/main --head HEAD
 codeatlas serve /path/to/repo --port 9000
 codeatlas demo
 ```
@@ -74,6 +75,7 @@ codeatlas demo
 - `changes` narrows the report to files touched between two git refs, which is useful for pull request review.
 - hotspot and changed-file views inherit `CODEOWNERS` assignments so review surfaces show likely owners.
 - `owners` prints owner-by-owner load and their hottest files.
+- `reviewers` suggests reviewer candidates from `CODEOWNERS` and git blame on the changed surface.
 
 ### GitHub Actions
 

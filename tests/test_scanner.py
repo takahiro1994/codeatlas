@@ -9,10 +9,12 @@ from codeatlas.scanner import (
     focus_report_on_paths,
     format_summary,
     format_owner_summary,
+    format_reviewer_suggestions,
     load_report,
     report_to_markdown,
     report_to_sarif,
     scan_project,
+    suggest_reviewers,
 )
 from codeatlas.server import render_dashboard
 
@@ -85,6 +87,20 @@ class ScannerTests(unittest.TestCase):
             self.assertTrue(any(item["owner"] == "@team-core" for item in report.owners))
             owner_summary = format_owner_summary(report)
             self.assertIn("@team-core", owner_summary)
+
+    def test_reviewer_suggestions_use_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("# TODO: keep owner mapping\n", encoding="utf-8")
+            (root / ".github").mkdir()
+            (root / ".github" / "CODEOWNERS").write_text("src/* @team-core @alice\n", encoding="utf-8")
+            report = scan_project(root)
+            focused = focus_report_on_paths(report, ["src/app.py"])
+            suggestions = suggest_reviewers(focused)
+            summary = format_reviewer_suggestions(focused)
+            self.assertTrue(any(item["candidate"] == "@team-core" for item in suggestions))
+            self.assertIn("@team-core", summary)
 
     def test_todo_extraction_prefers_comment_context(self) -> None:
         py_items = extract_todos(

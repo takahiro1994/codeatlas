@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .scanner import (
     compare_reports,
     format_delta,
     format_summary,
+    focus_report_on_paths,
+    list_changed_files,
     load_report,
     report_to_json,
     report_to_markdown,
@@ -35,6 +38,15 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
     compare_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     compare_parser.add_argument("--output", help="Write the diff report to a file.")
+
+    changes_parser = subparsers.add_parser("changes", help="Analyze only files changed between two git refs.")
+    changes_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
+    changes_parser.add_argument("--base", default="HEAD~1", help="Base git ref for the diff.")
+    changes_parser.add_argument("--head", default="HEAD", help="Head git ref for the diff.")
+    changes_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    changes_parser.add_argument("--markdown", action="store_true", help="Emit Markdown instead of text.")
+    changes_parser.add_argument("--sarif", action="store_true", help="Emit SARIF instead of text.")
+    changes_parser.add_argument("--output", help="Write the focused report to a file.")
 
     serve_parser = subparsers.add_parser("serve", help="Launch the dashboard.")
     serve_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
@@ -79,6 +91,23 @@ def main() -> None:
     if args.command == "demo":
         demo_root = Path(__file__).resolve().parents[2] / "examples" / "sample_repo"
         serve(str(demo_root), host=args.host, port=args.port)
+        return
+    if args.command == "changes":
+        report = scan_project(args.path)
+        changed = list_changed_files(args.path, base_ref=args.base, head_ref=args.head)
+        focused = focus_report_on_paths(report, changed)
+        output = (
+            report_to_json(focused)
+            if args.json
+            else report_to_markdown(focused)
+            if args.markdown
+            else report_to_sarif(focused)
+            if args.sarif
+            else format_summary(focused)
+        )
+        if args.output:
+            Path(args.output).write_text(output, encoding="utf-8")
+        print(output)
 
 
 if __name__ == "__main__":

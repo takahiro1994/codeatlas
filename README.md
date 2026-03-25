@@ -37,6 +37,7 @@ codeatlas scan /path/to/repo --json --output report.json
 codeatlas scan /path/to/repo --markdown --output report.md
 codeatlas scan /path/to/repo --sarif --output report.sarif
 codeatlas compare baseline.json /path/to/repo
+codeatlas changes /path/to/repo --base main --head HEAD --markdown
 codeatlas serve /path/to/repo --port 9000
 codeatlas demo
 ```
@@ -67,6 +68,15 @@ codeatlas demo
 
 - `--sarif` exports findings into a format that GitHub code scanning and other CI systems can ingest.
 - `compare` lets you diff a stored baseline report against the current working tree to spot new TODOs, new documentation drift, and worsening hotspots.
+- `changes` narrows the report to files touched between two git refs, which is useful for pull request review.
+
+### GitHub Actions
+
+The repository includes [codeatlas.yml](/root/codeatlas/.github/workflows/codeatlas.yml), which:
+
+- runs the test suite on `push` and `pull_request`
+- uploads a SARIF report to GitHub code scanning
+- writes a focused changed-file report into the PR job summary
 
 ## Roadmap
 

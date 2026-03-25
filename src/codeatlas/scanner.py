@@ -119,14 +119,66 @@ def extract_dependencies(path: Path, text: str) -> list[str]:
 
 def extract_todos(rel_path: str, text: str) -> list[TodoItem]:
     items: list[TodoItem] = []
+    suffix = Path(rel_path).suffix.lower()
     for line_number, line in enumerate(text.splitlines(), start=1):
-        match = TODO_RE.search(line)
+        candidate = extract_comment_text(line, suffix)
+        if not candidate:
+            continue
+        match = TODO_RE.search(candidate)
         if not match:
             continue
         label = match.group(1).upper()
-        detail = (match.group(2) or "").strip() or line.strip()
+        detail = (match.group(2) or "").strip() or candidate.strip()
         items.append(TodoItem(path=rel_path, line=line_number, label=label, text=detail))
     return items
+
+
+def extract_comment_text(line: str, suffix: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if suffix in {".py", ".sh", ".yml", ".yaml", ".rb"}:
+        comment = text_after_unquoted_hash(line)
+        if comment is None:
+            return None
+        return comment
+    if suffix in {".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".go", ".rs", ".c", ".cpp", ".h", ".hpp"}:
+        if "//" in line:
+            return line.split("//", 1)[1].strip()
+        if "/*" in line:
+            return line.split("/*", 1)[1].split("*/", 1)[0].strip()
+        if stripped.startswith("*"):
+            return stripped.lstrip("*").strip()
+        return None
+    if suffix in {".md", ".rst", ".txt"}:
+        if stripped.startswith("<!--"):
+            return stripped.replace("<!--", "").replace("-->", "").strip()
+        if stripped.startswith(("- [ ]", "* [ ]")):
+            return stripped[5:].strip()
+        return None
+    return stripped
+
+
+def text_after_unquoted_hash(line: str) -> str | None:
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "#" and not in_single and not in_double:
+            return line[index + 1 :].strip()
+    return None
 
 
 def normalize_doc_reference(doc_path: Path, root: Path, reference: str) -> str | None:
@@ -211,6 +263,27 @@ def load_git_churn(root: Path) -> dict[str, int]:
         if item:
             churn[item] += 1
     return dict(churn)
+
+
+def list_changed_files(root: str | Path, base_ref: str = "HEAD~1", head_ref: str = "HEAD") -> list[str]:
+    root_path = Path(root).resolve()
+    if not (root_path / ".git").exists():
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root_path), "diff", "--name-only", f"{base_ref}..{head_ref}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    changed = []
+    for line in proc.stdout.splitlines():
+        item = line.strip()
+        if item:
+            changed.append(item)
+    return changed
 
 
 def generate_insights(summary: Summary, files: list[FileReport], doc_issues: list[DocIssue]) -> list[str]:
@@ -542,4 +615,41 @@ def load_report(path: str | Path) -> ProjectReport:
         doc_issues=[DocIssue(**item) for item in payload.get("doc_issues", [])],
         graph=payload.get("graph", {"nodes": [], "edges": []}),
         insights=payload.get("insights", []),
+    )
+
+
+def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectReport:
+    normalized = set(paths)
+    files = [item for item in report.files if item.path in normalized]
+    todos = [item for item in report.todos if item.path in normalized]
+    doc_issues = [item for item in report.doc_issues if item.doc_path in normalized or item.referenced_path in normalized]
+    node_ids = {item.path for item in files}
+    edges = [
+        item
+        for item in report.graph.get("edges", [])
+        if item.get("source") in node_ids or item.get("target") in node_ids
+    ]
+    nodes = [item for item in report.graph.get("nodes", []) if item.get("id") in node_ids]
+    summary = Summary(
+        root=report.summary.root,
+        total_files=len(files),
+        total_lines=sum(item.lines for item in files),
+        languages=dict(sorted(Counter(item.language for item in files).items())),
+        total_dependencies=len(edges),
+        todo_count=len(todos),
+        warning_count=sum(len(item.warnings) for item in files) + len(doc_issues),
+        hottest_files=[item.path for item in files[:5]],
+    )
+    insights = [
+        f"Focused report across {len(files)} changed files.",
+        f"{len(todos)} TODO-style markers are present in changed files.",
+        f"{len(doc_issues)} documentation issues touch the changed surface.",
+    ]
+    return ProjectReport(
+        summary=summary,
+        files=files,
+        todos=todos,
+        doc_issues=doc_issues,
+        graph={"nodes": nodes, "edges": edges},
+        insights=insights,
     )

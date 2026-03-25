@@ -3,7 +3,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codeatlas.scanner import compare_reports, format_summary, load_report, report_to_markdown, report_to_sarif, scan_project
+from codeatlas.scanner import (
+    compare_reports,
+    extract_todos,
+    focus_report_on_paths,
+    format_summary,
+    load_report,
+    report_to_markdown,
+    report_to_sarif,
+    scan_project,
+)
 from codeatlas.server import render_dashboard
 
 
@@ -54,6 +63,26 @@ class ScannerTests(unittest.TestCase):
             report_path.write_text(json.dumps(payload), encoding="utf-8")
             reloaded = load_report(report_path)
             self.assertEqual(reloaded.summary.total_files, current.summary.total_files)
+
+    def test_focus_report_on_paths(self) -> None:
+        report = scan_project(FIXTURE_ROOT)
+        focused = focus_report_on_paths(report, ["src/app.py"])
+        self.assertEqual(focused.summary.total_files, 1)
+        self.assertEqual(focused.files[0].path, "src/app.py")
+        self.assertTrue(all(item.path == "src/app.py" for item in focused.todos))
+
+    def test_todo_extraction_prefers_comment_context(self) -> None:
+        py_items = extract_todos(
+            "demo.py",
+            'message = "TODO should not count"\n# TODO: keep this one\nvalue = 1\n',
+        )
+        md_items = extract_todos(
+            "README.md",
+            "- [ ] TODO: checklist item\nParagraph mentioning TODO should not count.\n",
+        )
+        self.assertEqual(len(py_items), 1)
+        self.assertEqual(py_items[0].text, "keep this one")
+        self.assertEqual(len(md_items), 1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,44 @@
+name: CodeAtlas
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Generate SARIF
+        run: PYTHONPATH=src python -m codeatlas scan . --sarif --output codeatlas.sarif
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: codeatlas.sarif
+
+      - name: Summarize changed files
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          PYTHONPATH=src python -m codeatlas changes . --base "$BASE_SHA" --head "$HEAD_SHA" --markdown --output changed-report.md
+          cat changed-report.md >> "$GITHUB_STEP_SUMMARY"

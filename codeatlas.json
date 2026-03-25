@@ -1,4 +1,23 @@
 {
+  "layers": [
+    {
+      "name": "runtime",
+      "paths": ["src/codeatlas/"],
+      "forbidden": ["tests", "examples"],
+      "severity": "warning",
+      "message": "Runtime code must stay independent from tests and examples"
+    },
+    {
+      "name": "tests",
+      "paths": ["tests/"],
+      "may_depend_on": ["runtime", "examples"]
+    },
+    {
+      "name": "examples",
+      "paths": ["examples/"],
+      "may_depend_on": ["runtime"]
+    }
+  ],
   "rules": [
     {
       "name": "runtime-must-not-import-tests",
@@ -16,4 +35,3 @@
     }
   ]
 }
-

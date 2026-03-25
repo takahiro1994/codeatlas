@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -134,14 +135,48 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def extract_dependencies(path: Path, text: str) -> list[str]:
+def package_parts_for_path(path: Path) -> list[str]:
+    rel_no_suffix = path.with_suffix("")
+    parts = list(rel_no_suffix.parts)
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return parts
+
+
+def extract_python_dependencies(path: Path, text: str) -> list[str]:
     deps: list[str] = []
-    suffix = path.suffix.lower()
-    if suffix == ".py":
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
         for match in PY_IMPORT_RE.finditer(text):
             dep = match.group(1) or match.group(2)
             if dep:
                 deps.append(dep)
+        return sorted(set(deps))
+
+    package_parts = package_parts_for_path(path)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name:
+                    deps.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                dots = "." * node.level
+                module = node.module or ""
+                deps.append(dots + module)
+            elif node.module:
+                deps.append(node.module)
+            elif package_parts:
+                deps.append(".".join(package_parts[:-1]))
+    return sorted(set(dep for dep in deps if dep))
+
+
+def extract_dependencies(path: Path, text: str) -> list[str]:
+    deps: list[str] = []
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        deps.extend(extract_python_dependencies(path, text))
     elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
         for match in JS_IMPORT_RE.finditer(text):
             dep = match.group(1) or match.group(2)
@@ -295,11 +330,28 @@ def resolve_local_edges(files: list[FileReport], path_map: dict[str, FileReport]
                 edges.append({"source": report.path, "target": target})
                 path_map[target].incoming_dependencies.append(report.path)
             elif dep.startswith("."):
-                local_candidate = str((Path(path_without_suffix).parent / dep).with_suffix(Path(report.path).suffix))
-                if local_candidate in path_map:
-                    edges.append({"source": report.path, "target": local_candidate})
-                    path_map[local_candidate].incoming_dependencies.append(report.path)
+                relative_target = resolve_relative_dependency(report.path, dep)
+                if relative_target and relative_target in path_map:
+                    edges.append({"source": report.path, "target": relative_target})
+                    path_map[relative_target].incoming_dependencies.append(report.path)
     return edges
+
+
+def resolve_relative_dependency(source_path: str, dep: str) -> str | None:
+    suffix = Path(source_path).suffix
+    module_path = Path(source_path).with_suffix("")
+    package_parts = list(module_path.parts[:-1])
+    level = len(dep) - len(dep.lstrip("."))
+    remainder = dep.lstrip(".").replace(".", "/")
+    if level <= 0:
+        return None
+    ascend = max(level - 1, 0)
+    if ascend > len(package_parts):
+        return None
+    base_parts = package_parts[: len(package_parts) - ascend]
+    if remainder:
+        base_parts.extend(Path(remainder).parts)
+    return str(Path(*base_parts).with_suffix(suffix))
 
 
 def detect_cycles(edges: list[dict[str, str]]) -> list[list[str]]:
@@ -363,6 +415,59 @@ def evaluate_rules(edges: list[dict[str, str]], config: dict) -> list[RuleViolat
     return violations
 
 
+def build_layer_index(config: dict) -> list[dict]:
+    layers: list[dict] = []
+    for layer in config.get("layers", []):
+        prefixes = layer.get("paths", [])
+        if not prefixes:
+            continue
+        layers.append(
+            {
+                "name": layer.get("name", "unnamed-layer"),
+                "paths": prefixes,
+                "may_depend_on": layer.get("may_depend_on", []),
+                "forbidden": layer.get("forbidden", []),
+                "severity": layer.get("severity", "warning"),
+                "message": layer.get("message", ""),
+            }
+        )
+    return layers
+
+
+def find_layer_for_path(path: str, layers: list[dict]) -> dict | None:
+    for layer in layers:
+        if matches_any_prefix(path, layer["paths"]):
+            return layer
+    return None
+
+
+def evaluate_layers(edges: list[dict[str, str]], config: dict) -> list[RuleViolation]:
+    layers = build_layer_index(config)
+    violations: list[RuleViolation] = []
+    for edge in edges:
+        source_layer = find_layer_for_path(edge["source"], layers)
+        target_layer = find_layer_for_path(edge["target"], layers)
+        if not source_layer or not target_layer or source_layer["name"] == target_layer["name"]:
+            continue
+        may_depend_on = source_layer.get("may_depend_on", [])
+        forbidden = source_layer.get("forbidden", [])
+        forbidden_hit = target_layer["name"] in forbidden
+        allow_hit = bool(may_depend_on) and target_layer["name"] not in may_depend_on
+        if not forbidden_hit and not allow_hit:
+            continue
+        message = source_layer["message"] or f"{source_layer['name']} must not depend on {target_layer['name']}"
+        violations.append(
+            RuleViolation(
+                rule=f"layer:{source_layer['name']}",
+                severity=source_layer["severity"],
+                source=edge["source"],
+                target=edge["target"],
+                message=message,
+            )
+        )
+    return violations
+
+
 def compute_hotspot(report: FileReport, doc_issue_count: int) -> int:
     return (
         len(report.todos) * 3
@@ -414,6 +519,48 @@ def list_changed_files(root: str | Path, base_ref: str = "HEAD~1", head_ref: str
         if item:
             changed.append(item)
     return changed
+
+
+def list_worktree_files(root: str | Path) -> list[str]:
+    root_path = Path(root).resolve()
+    if not (root_path / ".git").exists():
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root_path), "status", "--short"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    changed: list[str] = []
+    for line in proc.stdout.splitlines():
+        item = line[3:].strip() if len(line) > 3 else ""
+        if item:
+            changed.append(item)
+    return changed
+
+
+def detect_base_ref(root: str | Path) -> str:
+    root_path = Path(root).resolve()
+    env_base = os.environ.get("GITHUB_BASE_REF")
+    if env_base:
+        return env_base
+    candidates = ["origin/main", "main", "origin/master", "master"]
+    for candidate in candidates:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root_path), "rev-parse", "--verify", candidate],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if proc.stdout.strip():
+            return candidate
+    return "HEAD~1"
 
 
 def load_git_authors(root: Path) -> dict[str, list[str]]:
@@ -524,6 +671,7 @@ def scan_project(root: str | Path) -> ProjectReport:
     edges = resolve_local_edges(file_reports, path_map)
     cycles = detect_cycles(edges)
     rule_violations = evaluate_rules(edges, config)
+    rule_violations.extend(evaluate_layers(edges, config))
     doc_issues = analyze_docs(root_path, file_set)
     doc_issue_count_by_file = defaultdict(int)
     for issue in doc_issues:

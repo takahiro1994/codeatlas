@@ -40,7 +40,7 @@ codeatlas scan /path/to/repo --sarif --output report.sarif
 codeatlas compare baseline.json /path/to/repo
 codeatlas changes /path/to/repo --base main --head HEAD --markdown
 codeatlas owners /path/to/repo
-codeatlas reviewers /path/to/repo --base origin/main --head HEAD
+codeatlas reviewers /path/to/repo --base auto --head HEAD
 codeatlas serve /path/to/repo --port 9000
 codeatlas demo
 ```
@@ -69,6 +69,7 @@ codeatlas demo
 - lightweight dependency visualization
 - interactive file drilldown with inline source preview
 - ownership load table driven by `CODEOWNERS`
+- client-side filtering and display limits for hotspots, TODOs, and graph nodes
 
 ### Configuration
 
@@ -90,11 +91,37 @@ CodeAtlas auto-loads `codeatlas.json` from the repository root, and also accepts
 
 This lets you encode simple architectural boundaries and have them appear in text, Markdown, JSON, and SARIF output.
 
+You can also define coarse-grained layers:
+
+```json
+{
+  "layers": [
+    {
+      "name": "ui",
+      "paths": ["src/ui/"],
+      "may_depend_on": ["domain"],
+      "message": "UI must stay above domain"
+    },
+    {
+      "name": "domain",
+      "paths": ["src/domain/"]
+    },
+    {
+      "name": "infra",
+      "paths": ["src/infra/"]
+    }
+  ]
+}
+```
+
+If `ui` imports `infra`, CodeAtlas reports a structural violation even if the raw import itself resolves successfully.
+
 ### CI And Review Workflows
 
 - `--sarif` exports findings into a format that GitHub code scanning and other CI systems can ingest.
 - `compare` lets you diff a stored baseline report against the current working tree to spot new TODOs, new documentation drift, and worsening hotspots.
 - `changes` narrows the report to files touched between two git refs, which is useful for pull request review.
+- `changes` and `reviewers` accept `--base auto`, which prefers `GITHUB_BASE_REF`, then `origin/main`, `main`, `origin/master`, `master`, and finally `HEAD~1`. If no committed diff is found, they fall back to uncommitted worktree files.
 - hotspot and changed-file views inherit `CODEOWNERS` assignments so review surfaces show likely owners.
 - `owners` prints owner-by-owner load and their hottest files.
 - `reviewers` suggests reviewer candidates from `CODEOWNERS` and git blame on the changed surface.

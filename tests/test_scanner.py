@@ -5,11 +5,14 @@ from pathlib import Path
 
 from codeatlas.scanner import (
     compare_reports,
+    detect_base_ref,
     extract_todos,
+    extract_python_dependencies,
     focus_report_on_paths,
     format_summary,
     format_owner_summary,
     format_reviewer_suggestions,
+    list_worktree_files,
     load_report,
     report_to_markdown,
     report_to_sarif,
@@ -144,6 +147,37 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(report.rule_violations[0].rule, "ui-must-not-import-db")
             self.assertEqual(len(report.cycles), 1)
             self.assertIn("src/ui/screen.py", report.cycles[0])
+
+    def test_layer_rules_and_ast_python_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "ui").mkdir(parents=True)
+            (root / "src" / "domain").mkdir(parents=True)
+            (root / "src" / "infra").mkdir(parents=True)
+            ui_path = root / "src" / "ui" / "screen.py"
+            ui_text = "from ..infra.repo import load\n"
+            ui_path.write_text(ui_text, encoding="utf-8")
+            (root / "src" / "infra" / "repo.py").write_text("def load():\n    return 1\n", encoding="utf-8")
+            (root / "codeatlas.json").write_text(
+                json.dumps(
+                    {
+                        "layers": [
+                            {"name": "ui", "paths": ["src/ui/"], "may_depend_on": ["domain"], "message": "UI must stay above domain"},
+                            {"name": "domain", "paths": ["src/domain/"], "may_depend_on": []},
+                            {"name": "infra", "paths": ["src/infra/"], "may_depend_on": []}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            deps = extract_python_dependencies(Path("src/ui/screen.py"), ui_text)
+            report = scan_project(root)
+            self.assertIn("..infra.repo", deps)
+            self.assertTrue(any(item.rule == "layer:ui" for item in report.rule_violations))
+
+    def test_detect_base_ref_and_worktree_listing(self) -> None:
+        self.assertTrue(detect_base_ref(FIXTURE_ROOT.parent) in {"origin/main", "main", "origin/master", "master", "HEAD~1"})
+        self.assertIsInstance(list_worktree_files(FIXTURE_ROOT.parent), list)
 
 
 if __name__ == "__main__":

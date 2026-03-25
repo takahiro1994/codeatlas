@@ -12,26 +12,6 @@ from .scanner import scan_project
 def render_dashboard(root: str) -> str:
     report = scan_project(root).to_dict()
     payload = json.dumps(report)
-    hottest_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(item['path'])}</td>"
-        f"<td>{html.escape(item['language'])}</td>"
-        f"<td>{html.escape(', '.join(item.get('owners', [])) or 'unowned')}</td>"
-        f"<td>{item['lines']}</td>"
-        f"<td>{len(item['outgoing_dependencies'])}</td>"
-        f"<td>{len(item['todos'])}</td>"
-        f"<td>{item['hotspot_score']}</td>"
-        "</tr>"
-        for item in report["files"][:12]
-    )
-    todo_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(item['label'])}</td>"
-        f"<td>{html.escape(item['path'])}:{item['line']}</td>"
-        f"<td>{html.escape(item['text'])}</td>"
-        "</tr>"
-        for item in report["todos"][:12]
-    )
     insight_cards = "".join(f"<li>{html.escape(item)}</li>" for item in report["insights"])
     owner_rows = "".join(
         "<tr>"
@@ -39,10 +19,6 @@ def render_dashboard(root: str) -> str:
         f"<td>{item['files']}</td>"
         "</tr>"
         for item in report.get("owners", [])[:10]
-    )
-    file_options = "".join(
-        f'<option value="{html.escape(item["path"])}">{html.escape(item["path"])}</option>'
-        for item in report["files"][:80]
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -149,6 +125,12 @@ def render_dashboard(root: str) -> str:
     .table-wrap, .graph-wrap {{
       padding: 18px;
     }}
+    .controls {{
+      display: grid;
+      grid-template-columns: 1.2fr 0.6fr;
+      gap: 10px;
+      margin: 12px 0 16px;
+    }}
     .graph {{
       min-height: 420px;
       position: relative;
@@ -193,7 +175,7 @@ def render_dashboard(root: str) -> str:
       font-size: 0.9rem;
       line-height: 1.45;
     }}
-    select, button {{
+    input, select, button {{
       width: 100%;
       padding: 12px 14px;
       border-radius: 12px;
@@ -203,7 +185,7 @@ def render_dashboard(root: str) -> str:
       margin-top: 10px;
     }}
     @media (max-width: 960px) {{
-      .hero, .content, .owners-grid {{ grid-template-columns: 1fr; }}
+      .hero, .content, .owners-grid, .controls {{ grid-template-columns: 1fr; }}
       .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .viewer {{ grid-template-columns: 1fr; }}
     }}
@@ -232,20 +214,38 @@ def render_dashboard(root: str) -> str:
     <section class="content">
       <div class="panel table-wrap">
         <h2>Hotspots</h2>
+        <div class="controls">
+          <input id="hotspot-filter" placeholder="Filter files by path or owner">
+          <select id="hotspot-limit">
+            <option value="12">12 rows</option>
+            <option value="25">25 rows</option>
+            <option value="50">50 rows</option>
+            <option value="999">All rows</option>
+          </select>
+        </div>
         <table>
           <thead>
             <tr><th>Path</th><th>Lang</th><th>Owners</th><th>Lines</th><th>Deps</th><th>TODOs</th><th>Score</th></tr>
           </thead>
-          <tbody>{hottest_rows}</tbody>
+          <tbody id="hotspot-body"></tbody>
         </table>
       </div>
       <div class="panel table-wrap">
         <h2>TODO Feed</h2>
+        <div class="controls">
+          <input id="todo-filter" placeholder="Filter TODOs by path or text">
+          <select id="todo-limit">
+            <option value="12">12 rows</option>
+            <option value="25">25 rows</option>
+            <option value="50">50 rows</option>
+            <option value="999">All rows</option>
+          </select>
+        </div>
         <table>
           <thead>
             <tr><th>Type</th><th>Location</th><th>Detail</th></tr>
           </thead>
-          <tbody>{todo_rows or '<tr><td colspan="3">No TODO markers found.</td></tr>'}</tbody>
+          <tbody id="todo-body"></tbody>
         </table>
       </div>
     </section>
@@ -263,6 +263,7 @@ def render_dashboard(root: str) -> str:
       <div class="panel table-wrap">
         <h2>Review Angle</h2>
         <div class="meta">Pair hotspot rank with ownership to see who is likely to review or absorb risk.</div>
+        <div class="meta" id="rules-summary" style="margin-top:12px;"></div>
       </div>
     </section>
 
@@ -273,6 +274,15 @@ def render_dashboard(root: str) -> str:
         <span class="pill">Green: JavaScript / TypeScript</span>
         <span class="pill">Rose: Markdown / Docs</span>
       </div>
+      <div class="controls">
+        <input id="graph-filter" placeholder="Filter graph nodes by path">
+        <select id="graph-limit">
+          <option value="28">28 nodes</option>
+          <option value="60">60 nodes</option>
+          <option value="120">120 nodes</option>
+          <option value="999">All nodes</option>
+        </select>
+      </div>
       <div class="graph"><svg id="graph" viewBox="0 0 900 420" preserveAspectRatio="xMidYMid meet"></svg></div>
     </section>
 
@@ -280,7 +290,7 @@ def render_dashboard(root: str) -> str:
       <div class="panel viewer-controls">
         <h2>File Drilldown</h2>
         <div class="meta">Inspect source without leaving the dashboard.</div>
-        <select id="file-picker">{file_options}</select>
+        <select id="file-picker"></select>
         <button id="load-file">Load File</button>
       </div>
       <div class="panel"><pre id="file-content">Select a file to preview its contents.</pre></div>
@@ -292,58 +302,94 @@ def render_dashboard(root: str) -> str:
     const report = {payload};
     const svg = document.getElementById("graph");
     const ns = "http://www.w3.org/2000/svg";
-    const nodes = report.graph.nodes.slice(0, 28);
-    const edges = report.graph.edges.filter(edge =>
-      nodes.some(node => node.id === edge.source) && nodes.some(node => node.id === edge.target)
-    );
-    const cx = 450, cy = 210, radius = 150;
-    const nodePos = new Map();
-    nodes.forEach((node, index) => {{
-      const angle = (Math.PI * 2 * index) / Math.max(nodes.length, 1);
-      const wobble = 22 * Math.sin(index * 1.7);
-      const x = cx + Math.cos(angle) * (radius + wobble);
-      const y = cy + Math.sin(angle) * (radius - wobble);
-      nodePos.set(node.id, {{ x, y }});
-    }});
+    const byId = (id) => document.getElementById(id);
     const colorFor = (language) => {{
       if (language === "Python") return "#f59e0b";
       if (language === "JavaScript" || language === "TypeScript") return "#22c55e";
       if (language === "Markdown") return "#fb7185";
       return "#93c5fd";
     }};
-    edges.forEach(edge => {{
-      const a = nodePos.get(edge.source);
-      const b = nodePos.get(edge.target);
-      if (!a || !b) return;
-      const line = document.createElementNS(ns, "line");
-      line.setAttribute("x1", a.x);
-      line.setAttribute("y1", a.y);
-      line.setAttribute("x2", b.x);
-      line.setAttribute("y2", b.y);
-      line.setAttribute("stroke", "rgba(148,163,184,0.28)");
-      line.setAttribute("stroke-width", "1.3");
-      svg.appendChild(line);
-    }});
-    nodes.forEach(node => {{
-      const pos = nodePos.get(node.id);
-      const group = document.createElementNS(ns, "g");
-      const circle = document.createElementNS(ns, "circle");
-      circle.setAttribute("cx", pos.x);
-      circle.setAttribute("cy", pos.y);
-      circle.setAttribute("r", 9);
-      circle.setAttribute("fill", colorFor(node.language));
-      const label = document.createElementNS(ns, "text");
-      label.setAttribute("x", pos.x + 12);
-      label.setAttribute("y", pos.y + 4);
-      label.setAttribute("fill", "#e2e8f0");
-      label.setAttribute("font-size", "10");
-      label.textContent = node.id.split("/").slice(-2).join("/");
-      group.appendChild(circle);
-      group.appendChild(label);
-      svg.appendChild(group);
-    }});
-    const picker = document.getElementById("file-picker");
-    const output = document.getElementById("file-content");
+    const picker = byId("file-picker");
+    const output = byId("file-content");
+    const renderHotspots = () => {{
+      const filter = byId("hotspot-filter").value.toLowerCase();
+      const limit = Number(byId("hotspot-limit").value);
+      const rows = report.files
+        .filter(item => !filter || item.path.toLowerCase().includes(filter) || (item.owners || []).join(" ").toLowerCase().includes(filter))
+        .slice(0, limit)
+        .map(item => `<tr><td>${{item.path}}</td><td>${{item.language}}</td><td>${{(item.owners || []).join(", ") || "unowned"}}</td><td>${{item.lines}}</td><td>${{item.outgoing_dependencies.length}}</td><td>${{item.todos.length}}</td><td>${{item.hotspot_score}}</td></tr>`)
+        .join("");
+      byId("hotspot-body").innerHTML = rows || '<tr><td colspan="7">No files match the filter.</td></tr>';
+    }};
+    const renderTodos = () => {{
+      const filter = byId("todo-filter").value.toLowerCase();
+      const limit = Number(byId("todo-limit").value);
+      const rows = report.todos
+        .filter(item => !filter || item.path.toLowerCase().includes(filter) || item.text.toLowerCase().includes(filter))
+        .slice(0, limit)
+        .map(item => `<tr><td>${{item.label}}</td><td>${{item.path}}:${{item.line}}</td><td>${{item.text}}</td></tr>`)
+        .join("");
+      byId("todo-body").innerHTML = rows || '<tr><td colspan="3">No TODO markers found.</td></tr>';
+    }};
+    const renderPicker = () => {{
+      const current = picker.value;
+      picker.innerHTML = report.files
+        .map(item => `<option value="${{item.path}}">${{item.path}}</option>`)
+        .join("");
+      if (current) picker.value = current;
+    }};
+    const renderGraph = () => {{
+      svg.innerHTML = "";
+      const filter = byId("graph-filter").value.toLowerCase();
+      const limit = Number(byId("graph-limit").value);
+      const nodes = report.graph.nodes
+        .filter(node => !filter || node.id.toLowerCase().includes(filter))
+        .slice(0, limit);
+      const edges = report.graph.edges.filter(edge =>
+        nodes.some(node => node.id === edge.source) && nodes.some(node => node.id === edge.target)
+      );
+      const cx = 450, cy = 210, radius = Math.max(120, 180 - Math.min(nodes.length, 80));
+      const nodePos = new Map();
+      nodes.forEach((node, index) => {{
+        const angle = (Math.PI * 2 * index) / Math.max(nodes.length, 1);
+        const wobble = 22 * Math.sin(index * 1.7);
+        const x = cx + Math.cos(angle) * (radius + wobble);
+        const y = cy + Math.sin(angle) * (radius - wobble);
+        nodePos.set(node.id, {{ x, y }});
+      }});
+      edges.forEach(edge => {{
+        const a = nodePos.get(edge.source);
+        const b = nodePos.get(edge.target);
+        if (!a || !b) return;
+        const line = document.createElementNS(ns, "line");
+        line.setAttribute("x1", a.x);
+        line.setAttribute("y1", a.y);
+        line.setAttribute("x2", b.x);
+        line.setAttribute("y2", b.y);
+        line.setAttribute("stroke", "rgba(148,163,184,0.28)");
+        line.setAttribute("stroke-width", "1.3");
+        svg.appendChild(line);
+      }});
+      nodes.forEach(node => {{
+        const pos = nodePos.get(node.id);
+        const group = document.createElementNS(ns, "g");
+        const circle = document.createElementNS(ns, "circle");
+        circle.setAttribute("cx", pos.x);
+        circle.setAttribute("cy", pos.y);
+        circle.setAttribute("r", 9);
+        circle.setAttribute("fill", colorFor(node.language));
+        const label = document.createElementNS(ns, "text");
+        label.setAttribute("x", pos.x + 12);
+        label.setAttribute("y", pos.y + 4);
+        label.setAttribute("fill", "#e2e8f0");
+        label.setAttribute("font-size", "10");
+        label.textContent = node.id.split("/").slice(-2).join("/");
+        group.appendChild(circle);
+        group.appendChild(label);
+        svg.appendChild(group);
+      }});
+    }};
+    byId("rules-summary").textContent = `Rules: ${{report.rule_violations.length}} violations, cycles: ${{report.cycles.length}}.`;
     const loadFile = async () => {{
       const path = picker.value;
       if (!path) return;
@@ -351,7 +397,14 @@ def render_dashboard(root: str) -> str:
       const response = await fetch("/api/file?path=" + encodeURIComponent(path));
       output.textContent = await response.text();
     }};
-    document.getElementById("load-file").addEventListener("click", loadFile);
+    ["hotspot-filter", "hotspot-limit"].forEach(id => byId(id).addEventListener("input", renderHotspots));
+    ["todo-filter", "todo-limit"].forEach(id => byId(id).addEventListener("input", renderTodos));
+    ["graph-filter", "graph-limit"].forEach(id => byId(id).addEventListener("input", renderGraph));
+    byId("load-file").addEventListener("click", loadFile);
+    renderHotspots();
+    renderTodos();
+    renderPicker();
+    renderGraph();
     if (picker.value) loadFile();
   </script>
 </body>

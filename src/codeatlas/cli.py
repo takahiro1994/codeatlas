@@ -6,12 +6,14 @@ from pathlib import Path
 
 from .scanner import (
     compare_reports,
+    detect_base_ref,
     format_delta,
     format_owner_summary,
     format_reviewer_suggestions,
     format_summary,
     focus_report_on_paths,
     list_changed_files,
+    list_worktree_files,
     load_report,
     report_to_json,
     report_to_markdown,
@@ -49,14 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     reviewers_parser = subparsers.add_parser("reviewers", help="Suggest reviewers from owners and git blame.")
     reviewers_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
-    reviewers_parser.add_argument("--base", default="HEAD~1", help="Base git ref for the diff.")
+    reviewers_parser.add_argument("--base", default="auto", help="Base git ref for the diff.")
     reviewers_parser.add_argument("--head", default="HEAD", help="Head git ref for the diff.")
     reviewers_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     reviewers_parser.add_argument("--output", help="Write the reviewer suggestions to a file.")
 
     changes_parser = subparsers.add_parser("changes", help="Analyze only files changed between two git refs.")
     changes_parser.add_argument("path", nargs="?", default=".", help="Path to the repository root.")
-    changes_parser.add_argument("--base", default="HEAD~1", help="Base git ref for the diff.")
+    changes_parser.add_argument("--base", default="auto", help="Base git ref for the diff.")
     changes_parser.add_argument("--head", default="HEAD", help="Head git ref for the diff.")
     changes_parser.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     changes_parser.add_argument("--markdown", action="store_true", help="Emit Markdown instead of text.")
@@ -120,7 +122,10 @@ def main() -> None:
         return
     if args.command == "changes":
         report = scan_project(args.path)
-        changed = list_changed_files(args.path, base_ref=args.base, head_ref=args.head)
+        base_ref = detect_base_ref(args.path) if args.base == "auto" else args.base
+        changed = list_changed_files(args.path, base_ref=base_ref, head_ref=args.head)
+        if not changed and args.head == "HEAD":
+            changed = list_worktree_files(args.path)
         focused = focus_report_on_paths(report, changed)
         output = (
             report_to_json(focused)
@@ -137,7 +142,10 @@ def main() -> None:
         return
     if args.command == "reviewers":
         report = scan_project(args.path)
-        changed = list_changed_files(args.path, base_ref=args.base, head_ref=args.head)
+        base_ref = detect_base_ref(args.path) if args.base == "auto" else args.base
+        changed = list_changed_files(args.path, base_ref=base_ref, head_ref=args.head)
+        if not changed and args.head == "HEAD":
+            changed = list_worktree_files(args.path)
         focused = focus_report_on_paths(report, changed)
         output = (
             json.dumps({"root": focused.summary.root, "reviewers": suggest_reviewers(focused)}, indent=2)

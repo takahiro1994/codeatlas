@@ -19,6 +19,15 @@ class DocIssue:
 
 
 @dataclass(slots=True)
+class RuleViolation:
+    rule: str
+    severity: str
+    source: str
+    target: str
+    message: str
+
+
+@dataclass(slots=True)
 class FileReport:
     path: str
     language: str
@@ -56,10 +65,13 @@ class ProjectReport:
     files: list[FileReport]
     todos: list[TodoItem]
     doc_issues: list[DocIssue]
+    rule_violations: list[RuleViolation]
+    cycles: list[list[str]]
     graph: dict[str, list[dict[str, str]]]
     insights: list[str]
     owners: list[dict[str, int]]
     authors: list[dict[str, int]]
+    config: dict
 
     def to_dict(self) -> dict:
         return {
@@ -67,10 +79,13 @@ class ProjectReport:
             "files": [item.to_dict() for item in self.files],
             "todos": [asdict(item) for item in self.todos],
             "doc_issues": [asdict(item) for item in self.doc_issues],
+            "rule_violations": [asdict(item) for item in self.rule_violations],
+            "cycles": self.cycles,
             "graph": self.graph,
             "insights": self.insights,
             "owners": self.owners,
             "authors": self.authors,
+            "config": self.config,
         }
 
 

@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .models import DocIssue, FileReport, ProjectReport, ReportDelta, Summary, TodoItem
+from .models import DocIssue, FileReport, ProjectReport, ReportDelta, RuleViolation, Summary, TodoItem
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "Python",
@@ -51,6 +51,38 @@ JS_IMPORT_RE = re.compile(
     re.MULTILINE,
 )
 DOC_PATH_RE = re.compile(r"(?:\[[^\]]+\]\(([^)]+)\)|`([^`]+\.[A-Za-z0-9]+)`)")
+
+
+def normalize_prefix(pattern: str) -> str:
+    normalized = pattern.strip().lstrip("./")
+    if not normalized:
+        return normalized
+    if normalized.endswith("/"):
+        return normalized
+    return normalized + "/"
+
+
+def matches_any_prefix(path: str, prefixes: list[str]) -> bool:
+    if not prefixes:
+        return False
+    normalized_path = path.replace("\\", "/")
+    return any(normalized_path.startswith(normalize_prefix(prefix)) or normalized_path == prefix.strip().lstrip("./") for prefix in prefixes)
+
+
+def load_config(root: Path) -> dict:
+    for name in ("codeatlas.json", ".codeatlas.json"):
+        path = root / name
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(read_text(path))
+        except json.JSONDecodeError:
+            return {"path": str(path.relative_to(root)), "rules": [], "layers": [], "errors": ["invalid-json"]}
+        payload["path"] = str(path.relative_to(root))
+        payload.setdefault("rules", [])
+        payload.setdefault("layers", [])
+        return payload
+    return {"path": None, "rules": [], "layers": [], "errors": []}
 
 
 def should_skip(path: Path) -> bool:
@@ -253,8 +285,10 @@ def resolve_local_edges(files: list[FileReport], path_map: dict[str, FileReport]
             matches = [
                 candidate
                 for candidate in rel_paths
-                if candidate.rsplit(".", 1)[0].endswith(dep_key)
-                or candidate.startswith(dep.strip("./"))
+                if candidate.rsplit(".", 1)[0] == dep_key
+                or candidate.rsplit(".", 1)[0].endswith("/" + dep_key)
+                or candidate == dep.strip("./")
+                or candidate.startswith(dep.strip("./") + "/")
             ]
             if matches:
                 target = sorted(matches, key=len)[0]
@@ -266,6 +300,67 @@ def resolve_local_edges(files: list[FileReport], path_map: dict[str, FileReport]
                     edges.append({"source": report.path, "target": local_candidate})
                     path_map[local_candidate].incoming_dependencies.append(report.path)
     return edges
+
+
+def detect_cycles(edges: list[dict[str, str]]) -> list[list[str]]:
+    graph: dict[str, list[str]] = defaultdict(list)
+    for edge in edges:
+        graph[edge["source"]].append(edge["target"])
+
+    seen: set[tuple[str, ...]] = set()
+    cycles: list[list[str]] = []
+
+    def canonicalize(path: list[str]) -> tuple[str, ...]:
+        ring = path[:-1]
+        if not ring:
+            return tuple()
+        rotations = [tuple(ring[index:] + ring[:index]) for index in range(len(ring))]
+        return min(rotations)
+
+    def dfs(node: str, stack: list[str], visiting: set[str]) -> None:
+        stack.append(node)
+        visiting.add(node)
+        for target in graph.get(node, []):
+            if target in visiting:
+                cycle = stack[stack.index(target) :] + [target]
+                key = canonicalize(cycle)
+                if key and key not in seen:
+                    seen.add(key)
+                    cycles.append(cycle)
+                continue
+            if target in stack:
+                continue
+            dfs(target, stack, visiting)
+        visiting.remove(node)
+        stack.pop()
+
+    for node in sorted(graph):
+        dfs(node, [], set())
+    return sorted(cycles)
+
+
+def evaluate_rules(edges: list[dict[str, str]], config: dict) -> list[RuleViolation]:
+    violations: list[RuleViolation] = []
+    for rule in config.get("rules", []):
+        rule_name = rule.get("name", "unnamed-rule")
+        source_prefixes = rule.get("from", [])
+        target_prefixes = rule.get("to", []) or rule.get("disallow", [])
+        if not source_prefixes or not target_prefixes:
+            continue
+        severity = rule.get("severity", "warning")
+        message = rule.get("message", f"{rule_name} violated")
+        for edge in edges:
+            if matches_any_prefix(edge["source"], source_prefixes) and matches_any_prefix(edge["target"], target_prefixes):
+                violations.append(
+                    RuleViolation(
+                        rule=rule_name,
+                        severity=severity,
+                        source=edge["source"],
+                        target=edge["target"],
+                        message=message,
+                    )
+                )
+    return violations
 
 
 def compute_hotspot(report: FileReport, doc_issue_count: int) -> int:
@@ -345,7 +440,13 @@ def load_git_authors(root: Path) -> dict[str, list[str]]:
     return authors_by_file
 
 
-def generate_insights(summary: Summary, files: list[FileReport], doc_issues: list[DocIssue]) -> list[str]:
+def generate_insights(
+    summary: Summary,
+    files: list[FileReport],
+    doc_issues: list[DocIssue],
+    rule_violations: list[RuleViolation],
+    cycles: list[list[str]],
+) -> list[str]:
     insights: list[str] = []
     if summary.total_files == 0:
         return ["No files were detected in the target path."]
@@ -353,6 +454,10 @@ def generate_insights(summary: Summary, files: list[FileReport], doc_issues: lis
         insights.append(f"{summary.todo_count} TODO-style markers were found across the codebase.")
     if doc_issues:
         insights.append(f"{len(doc_issues)} documentation references point to missing files.")
+    if rule_violations:
+        insights.append(f"{len(rule_violations)} structural rule violations were detected.")
+    if cycles:
+        insights.append(f"{len(cycles)} dependency cycles were detected.")
     if summary.hottest_files:
         insights.append(f"Highest-risk area: {summary.hottest_files[0]}.")
     dense = max(files, key=lambda item: len(item.outgoing_dependencies), default=None)
@@ -384,6 +489,7 @@ def scan_project(root: str | Path) -> ProjectReport:
     git_churn = load_git_churn(root_path)
     codeowners = load_codeowners(root_path)
     git_authors = load_git_authors(root_path)
+    config = load_config(root_path)
 
     for path in iter_files(root_path):
         rel_path = str(path.relative_to(root_path))
@@ -416,6 +522,8 @@ def scan_project(root: str | Path) -> ProjectReport:
 
     path_map = {report.path: report for report in file_reports}
     edges = resolve_local_edges(file_reports, path_map)
+    cycles = detect_cycles(edges)
+    rule_violations = evaluate_rules(edges, config)
     doc_issues = analyze_docs(root_path, file_set)
     doc_issue_count_by_file = defaultdict(int)
     for issue in doc_issues:
@@ -436,10 +544,10 @@ def scan_project(root: str | Path) -> ProjectReport:
         languages=dict(sorted(languages.items())),
         total_dependencies=len(edges),
         todo_count=len(all_todos),
-        warning_count=sum(len(item.warnings) for item in file_reports) + len(doc_issues),
+        warning_count=sum(len(item.warnings) for item in file_reports) + len(doc_issues) + len(rule_violations) + len(cycles),
         hottest_files=[item.path for item in ranked[:5]],
     )
-    insights = generate_insights(summary, file_reports, doc_issues)
+    insights = generate_insights(summary, file_reports, doc_issues, rule_violations, cycles)
     owner_counter = Counter(owner for item in file_reports for owner in item.owners)
     author_counter = Counter(author for item in file_reports for author in item.authors)
     return ProjectReport(
@@ -447,10 +555,13 @@ def scan_project(root: str | Path) -> ProjectReport:
         files=ranked,
         todos=all_todos,
         doc_issues=doc_issues,
+        rule_violations=rule_violations,
+        cycles=cycles,
         graph={"nodes": [{"id": item.path, "language": item.language} for item in file_reports], "edges": edges},
         insights=insights,
         owners=[{"owner": owner, "files": count} for owner, count in owner_counter.most_common()],
         authors=[{"author": author, "files": count} for author, count in author_counter.most_common()],
+        config=config,
     )
 
 
@@ -517,6 +628,15 @@ def report_to_markdown(report: ProjectReport) -> str:
         lines.extend(
             f"- `{item.doc_path}` references missing `{item.referenced_path}`" for item in report.doc_issues[:20]
         )
+    if report.rule_violations:
+        lines.extend(["", "## Structural Rules", ""])
+        lines.extend(
+            f"- `{item.rule}`: `{item.source}` -> `{item.target}` ({item.severity})"
+            for item in report.rule_violations[:20]
+        )
+    if report.cycles:
+        lines.extend(["", "## Dependency Cycles", ""])
+        lines.extend(f"- {' -> '.join(item)}" for item in report.cycles[:12])
     if report.owners:
         lines.extend(["", "## Ownership", ""])
         lines.extend(f"- `{item['owner']}` owns {item['files']} tracked files" for item in report.owners[:12])
@@ -564,6 +684,21 @@ def report_to_sarif(report: ProjectReport) -> str:
                 ],
             }
         )
+    for violation in report.rule_violations:
+        results.append(
+            {
+                "ruleId": f"codeatlas.arch.{violation.rule}",
+                "level": violation.severity,
+                "message": {"text": f"{violation.message}: {violation.source} -> {violation.target}"},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": violation.source},
+                        }
+                    }
+                ],
+            }
+        )
     for item in report.files:
         for warning in item.warnings:
             results.append(
@@ -596,6 +731,7 @@ def report_to_sarif(report: ProjectReport) -> str:
                             {"id": "codeatlas.todo.hack", "name": "HACK marker"},
                             {"id": "codeatlas.todo.note", "name": "NOTE marker"},
                             {"id": "codeatlas.doc.missing-reference", "name": "Missing doc reference"},
+                            {"id": "codeatlas.arch.rule", "name": "Architectural rule violation"},
                         ],
                     }
                 },
@@ -760,10 +896,13 @@ def load_report(path: str | Path) -> ProjectReport:
         files=files,
         todos=[TodoItem(**item) for item in payload.get("todos", [])],
         doc_issues=[DocIssue(**item) for item in payload.get("doc_issues", [])],
+        rule_violations=[RuleViolation(**item) for item in payload.get("rule_violations", [])],
+        cycles=payload.get("cycles", []),
         graph=payload.get("graph", {"nodes": [], "edges": []}),
         insights=payload.get("insights", []),
         owners=payload.get("owners", []),
         authors=payload.get("authors", []),
+        config=payload.get("config", {"path": None, "rules": [], "layers": [], "errors": []}),
     )
 
 
@@ -801,8 +940,11 @@ def focus_report_on_paths(report: ProjectReport, paths: list[str]) -> ProjectRep
         files=files,
         todos=todos,
         doc_issues=doc_issues,
+        rule_violations=[item for item in report.rule_violations if item.source in normalized or item.target in normalized],
+        cycles=[cycle for cycle in report.cycles if any(node in normalized for node in cycle)],
         graph={"nodes": nodes, "edges": edges},
         insights=insights,
         owners=[{"owner": owner, "files": count} for owner, count in owner_counter.most_common()],
         authors=[{"author": author, "files": count} for author, count in author_counter.most_common()],
+        config=report.config,
     )

@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "name": "runtime-must-not-import-tests",
+      "from": ["src/codeatlas/"],
+      "to": ["tests/"],
+      "severity": "warning",
+      "message": "Runtime code must not depend on tests"
+    },
+    {
+      "name": "runtime-must-not-import-examples",
+      "from": ["src/codeatlas/"],
+      "to": ["examples/"],
+      "severity": "warning",
+      "message": "Runtime code must not depend on examples"
+    }
+  ]
+}
+

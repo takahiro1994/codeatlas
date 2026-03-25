@@ -6,6 +6,7 @@ CodeAtlas is a local-first repository intelligence workbench. Point it at any co
 - hotspot ranking based on file size, TODO pressure, fan-in/fan-out, and structural warnings
 - git-aware churn scoring when the target is a git repository
 - documentation drift detection for broken local file references
+- config-driven structural rules and dependency cycle detection
 - a built-in dashboard served with the Python standard library
 
 The project is intentionally dependency-light so it can run in constrained environments.
@@ -56,6 +57,7 @@ codeatlas demo
 - git churn hotspots using local commit history
 - broken local references inside docs
 - CODEOWNERS-based ownership overlays when a repository defines them
+- config-defined architectural rule violations and local dependency cycles
 
 ### Output
 
@@ -68,6 +70,26 @@ codeatlas demo
 - interactive file drilldown with inline source preview
 - ownership load table driven by `CODEOWNERS`
 
+### Configuration
+
+CodeAtlas auto-loads `codeatlas.json` from the repository root, and also accepts a hidden variant with the same schema. The initial schema is intentionally small:
+
+```json
+{
+  "rules": [
+    {
+      "name": "ui-must-not-import-db",
+      "from": ["src/ui/"],
+      "to": ["src/db/"],
+      "severity": "warning",
+      "message": "UI must not depend on DB"
+    }
+  ]
+}
+```
+
+This lets you encode simple architectural boundaries and have them appear in text, Markdown, JSON, and SARIF output.
+
 ### CI And Review Workflows
 
 - `--sarif` exports findings into a format that GitHub code scanning and other CI systems can ingest.
@@ -76,6 +98,7 @@ codeatlas demo
 - hotspot and changed-file views inherit `CODEOWNERS` assignments so review surfaces show likely owners.
 - `owners` prints owner-by-owner load and their hottest files.
 - `reviewers` suggests reviewer candidates from `CODEOWNERS` and git blame on the changed surface.
+- `scan` now also reports structural rule violations and dependency cycles when the repo defines `codeatlas.json`.
 
 ### GitHub Actions
 

@@ -115,6 +115,36 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(py_items[0].text, "keep this one")
         self.assertEqual(len(md_items), 1)
 
+    def test_config_rules_and_cycle_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "ui").mkdir(parents=True)
+            (root / "src" / "db").mkdir(parents=True)
+            (root / "src" / "ui" / "screen.py").write_text("from db.repo import load\n", encoding="utf-8")
+            (root / "src" / "db" / "repo.py").write_text("from ui.screen import render\n", encoding="utf-8")
+            (root / "codeatlas.json").write_text(
+                json.dumps(
+                    {
+                        "rules": [
+                            {
+                                "name": "ui-must-not-import-db",
+                                "from": ["src/ui/"],
+                                "to": ["src/db/"],
+                                "severity": "warning",
+                                "message": "UI must not depend on DB"
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = scan_project(root)
+            self.assertEqual(report.config["path"], "codeatlas.json")
+            self.assertEqual(len(report.rule_violations), 1)
+            self.assertEqual(report.rule_violations[0].rule, "ui-must-not-import-db")
+            self.assertEqual(len(report.cycles), 1)
+            self.assertIn("src/ui/screen.py", report.cycles[0])
+
 
 if __name__ == "__main__":
     unittest.main()
